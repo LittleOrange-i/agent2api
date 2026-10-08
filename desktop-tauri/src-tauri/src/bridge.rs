@@ -524,6 +524,14 @@ const BRIDGE_JS: &str = r#"
     getClineHeaders: () => call('GET', '/api/cline/headers'),
     saveClineHeaders: overrides => call('PUT', '/api/cline/headers', { overrides }),
 
+    // ── 网关面跨域访问（/v1/*，默认关）──
+    // 与 web_shim.rs 的 getCors / saveCors 逐字同形：桌面壳走 Tauri IPC 到
+    // /api/cors，网页端走同源 fetch，两边接口名与签名必须一致（界面代码零改动
+    // 地跑在两边）。上一轮加这个开关时只补了 web_shim 那一侧，桌面壳这侧漏了，
+    // 于是设置页读不到值，卡在「未能读取网关跨域访问设置」。
+    getCors: () => call('GET', '/api/cors'),
+    saveCors: enabled => call('PUT', '/api/cors', { corsEnabled: enabled === true }),
+
     // ── 系统提示词与内容拦截降级 ──
     // 与 getRetry / saveRetry 同形：GET 读、PUT 写（允许部分字段），响应体是
     // 生效后的全量状态（含降级是否生效）。`clearDegrade` 是同一端点上的一个
