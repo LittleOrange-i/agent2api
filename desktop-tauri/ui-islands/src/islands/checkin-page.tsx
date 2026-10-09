@@ -164,8 +164,12 @@ function AccountRows({ group }: { group: CheckinProviderGroup }) {
         {group.accounts.map(account => {
           // WorkBuddy 国际版执行的是「每日活跃任务」：三颗按钮对应三档手动粒度
           // （保活 / 领取 / 保活+领取）—— 领取才会加积分，保活只维持活跃，
-          // 分开是当初一颗按钮混做两件事留下的教训
-          const dailyActivity = account.edition === 'intl'
+          // 分开是当初一颗按钮混做两件事留下的教训。
+          // 判据用**分组 id** 而不是账号的 `edition`：Qoder 国际版拆家后公开
+          // 形态同样带 `edition: "intl"`，按 edition 判会把它的账号派去
+          // WorkBuddy 的日活接口（上游稳定 400「该账号不是 WorkBuddy 国际版
+          // 账号」）。只有 `workbuddy-intl` 这一组执行日活链。
+          const dailyActivity = group.id === 'workbuddy-intl'
           return (
             <tr key={account.id}>
               <td>{account.name || account.id}</td>
