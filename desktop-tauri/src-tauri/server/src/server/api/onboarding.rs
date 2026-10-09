@@ -30,15 +30,24 @@
 //! 在签到完成后自己查一次、有未领取才自动领取（见 ui-islands 的
 //! checkin-state），领完自然不再弹。
 //!
-//! 响应形状（两家对齐）：
-//!   · status  → `{tasks:[{key,title,group,points,done}], earned, total, unclaimed}`
+//! ── 一次性福利的结算记忆 ─────────────────────────────────────
+//! 三家都是**一次性**福利：领完就没了。全部结清后账号记录上留一份记忆
+//! （`onboardingSettled`；小浣熊是它自己的 `onboardingGrants` 台账派生），
+//! 之后的查询与领取**零上游请求**（见 `providers::onboarding_memory`）。
+//! 手动「查询任务」按钮带 `?refresh=1` 强制实查 —— 那是唯一的"重新问上游"
+//! 入口，也是记忆被覆盖 / 清除的路径。
+//!
+//! 响应形状（三家对齐）：
+//!   · status  → `{tasks:[{key,title,group,points,done,blocked?}], earned, total,
+//!                 unclaimed, settled}`
 //!   · claim   → `{results:[{key,ok,already?,error?}], claimed, failed,
-//!                 claimedPoints, tasks, earned, total, unclaimed}`
+//!                 claimedPoints, tasks, earned, total, unclaimed, settled}`
 
 use serde_json::Value;
 
 use axum::response::Response;
 
+use crate::server::core::account_store::AccountStore;
 use crate::server::core::providers::{
     codearts::onboarding as codearts_onboarding, loomy::onboarding as loomy_onboarding,
     raccoon::onboarding as raccoon_onboarding,
@@ -73,12 +82,37 @@ fn provider_of_account(state: &ServerState, account_id: &str) -> String {
         .to_string()
 }
 
+/// 账号的「已结算」记忆视图（签到中心快照用；已结算 ⇒ 零上游直接渲染，见
+/// `core::providers::onboarding_memory`）。三家形状一致，消费方不必按 provider
+/// 分叉；没结算 / 未领完 → None。
+///
+/// 分派键与下面两个端点同一口径：provider 字符串直接来自账号记录，未知一律
+/// 走 Loomy（`loomy_account_record` 会对别家 id 返回 None，天然给出 None）。
+pub fn settled_view(store: &AccountStore, account_id: &str, provider: &str) -> Option<Value> {
+    match provider {
+        RACCOON_PROVIDER_ID => {
+            raccoon_onboarding::settled_view(store.raccoon_account_record(account_id).as_ref())
+        }
+        CODEARTS_PROVIDER_ID => {
+            codearts_onboarding::settled_view(store.codearts_account_record(account_id).as_ref())
+        }
+        _ => loomy_onboarding::settled_view(store.loomy_account_record(account_id).as_ref()),
+    }
+}
+
 /// `GET /api/accounts/{id}/onboarding` —— 任务状态快照。
-pub async fn status(state: &ServerState, account_id: &str) -> Response {
+///
+/// `refresh`（`?refresh=1`）强制实查上游：只在用户手点「查询任务」时置位，
+/// 其余（进页面、签到后自动补领）都吃结算记忆。
+pub async fn status(state: &ServerState, account_id: &str, refresh: bool) -> Response {
     let result = match provider_of_account(state, account_id).as_str() {
-        RACCOON_PROVIDER_ID => raccoon_onboarding::get_tasks(state.store(), account_id).await,
-        CODEARTS_PROVIDER_ID => codearts_onboarding::get_tasks(state.store(), account_id).await,
-        _ => loomy_onboarding::get_tasks(state.store(), account_id).await,
+        RACCOON_PROVIDER_ID => {
+            raccoon_onboarding::get_tasks(state.store(), account_id, refresh).await
+        }
+        CODEARTS_PROVIDER_ID => {
+            codearts_onboarding::get_tasks(state.store(), account_id, refresh).await
+        }
+        _ => loomy_onboarding::get_tasks(state.store(), account_id, refresh).await,
     };
     match result {
         Ok(data) => ok_json(data),

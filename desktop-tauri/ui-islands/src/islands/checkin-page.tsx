@@ -300,7 +300,11 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
             {cache?.status === 'loaded'
               ? `已领 ${tasks.length - unclaimed}/${tasks.length} · 累计 ${cache.earned}${cache.total ? ` / ${cache.total}` : ''} 积分`
               : '尚未查询任务状态'}
-            {cache?.checkedAt ? ` · 查询于 ${formatTime(cache.checkedAt)}` : ''}
+            {/* 记忆路径没有「查询于」（那是后端结算时刻，不是这一次查询）：
+                一次性福利领完后按「结算于」如实交代这份结果从哪来 */}
+            {cache?.settled && cache.settledAt
+              ? ` · 结算于 ${formatTime(cache.settledAt)}`
+              : cache?.checkedAt ? ` · 查询于 ${formatTime(cache.checkedAt)}` : ''}
           </div>
         </div>
         {/* stopPropagation：右侧按钮不触发行的展开 / 收起（点「查询任务」不该顺手折起清单） */}
@@ -312,11 +316,13 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
               : cache?.status === 'error'
                 ? <Badge variant='destructive' shape='tag'>查询失败</Badge>
                 : null}
+          {/* 手点「查询任务」= 强制实查（refresh）：结算过的账号进页面走记忆、
+              零上游，这颗按钮是唯一的"现在去问一次上游"入口（见 checkin-state） */}
           <Button
             size='sm'
             variant='outline'
             disabled={cache?.status === 'loading' || cache?.claiming === true}
-            onClick={() => void queryOnboarding(row.id, { expand: true })}
+            onClick={() => void queryOnboarding(row.id, { expand: true, refresh: true })}
           >
             {cache?.status === 'loading' ? '查询中…' : '查询任务'}
           </Button>
@@ -690,7 +696,7 @@ function CheckinPage() {
           </div>
           <div className='ck-stat-foot'>
             {onboardingRows.length
-              ? `已查 ${onboardingChecked.length} / 共 ${onboardingRows.length} 个账号`
+              ? `已有结果 ${onboardingChecked.length} / 共 ${onboardingRows.length} 个账号`
               : '没有支持新手任务的账号'}
           </div>
         </div>
@@ -732,14 +738,22 @@ function CheckinPage() {
             <div className='panel-head'>
               <h2>新手任务</h2>
               <span className='panel-sub'>
-                一次性福利 · 签到后自动查询并领取（领过之后就不再发写请求）· 点击行展开任务清单
+                一次性福利 · 签到后自动查询并领取，领完记在本机不再查上游 · 点击行展开任务清单
               </span>
               {onboardingRows.length > 0 ? (
                 <Button
                   size='sm'
                   variant='outline'
                   className='ml-auto'
-                  onClick={() => { for (const row of onboardingRows) void queryOnboarding(row.id) }}
+                  onClick={() => {
+                    for (const row of onboardingRows) {
+                      // 已结算的账号（快照带回了记忆）不进这一轮：它们的结论不会变，
+                      // 「全部查询」的语义是「把还没查的查一遍」。真要重问上游，
+                      // 逐行那颗「查询任务」才是强制实查的入口（refresh）。
+                      if (row.settled && typeof row.settled === 'object') continue
+                      void queryOnboarding(row.id)
+                    }
+                  }}
                 >
                   全部查询
                 </Button>

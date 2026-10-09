@@ -374,6 +374,42 @@ impl AccountStore {
             .is_ok()
     }
 
+    /// 记下「这个账号的新手任务（一次性福利）已全部结算」的快照
+    /// （账号记录上的 `onboardingSettled`；形状与读法见
+    /// [`StoredAccount::set_onboarding_settled`] 与
+    /// `crate::server::core::providers::onboarding_memory`）。
+    ///
+    /// 与 `mark_checkin` / `mark_onboarding_grant_batch` 同一口径：账号级事实、
+    /// 低频写、写盘失败不致命（返回 bool；上游那边奖励已经结清，调用方最多记
+    /// 一条日志）。**不**动 updatedAt（理由同上）。
+    ///
+    /// 形状校验只到「对象或 Null」为止：对象 = 写入（内容是各家自己的任务行
+    /// `{at, tasks, earned, total}`，这里不做跨家白名单 —— 唯一调用方就是那几家
+    /// 的 onboarding 模块，键名在那边随任务表定义）；**Null = 清除**（上游出了
+    /// 新一期活动之类的新事实时，记忆失效要能抹掉，读侧把 Null 当「没有」）。
+    /// 其余形态（数组 / 字符串 / 数字）整批拒绝，免得往账号记录里塞进读不出来的
+    /// 脏值。
+    ///
+    /// 与现存值相同时（含「本来就没什么可清」的 Null）**直接返回 true，不写库**：
+    /// 没领完的账号每次状态查询都会带着 `unclaimed > 0` 走到「清除」那一步，
+    /// 值没变也写一次盘是纯浪费 —— 这条链真正要写的只有结算那一次。
+    pub fn mark_onboarding_settled(&self, id: &str, snapshot: Value) -> bool {
+        if !(snapshot.is_object() || snapshot.is_null()) {
+            return false;
+        }
+        let _guard = self.guard();
+        let Some(mut record) = self.record_by_id(&_guard, id) else {
+            return false;
+        };
+        let existing = record.fields().get("onboardingSettled");
+        if existing == Some(&snapshot) || (snapshot.is_null() && existing.is_none()) {
+            return true;
+        }
+        record.set_onboarding_settled(snapshot);
+        self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))
+            .is_ok()
+    }
+
     // ─── 迁移 ────────────────────────────────────────────────
 
     /// 启动时的一次性数据迁移（**唯一入口**，bootstrap 只调它）。

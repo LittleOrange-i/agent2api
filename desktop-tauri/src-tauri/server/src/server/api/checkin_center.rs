@@ -171,29 +171,26 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         .collect();
 
     // ── 一次性 / 手动项的账号入口清单（资格状态由前端惰性查询）──
-    // 各家的账号行都是 {id, name, provider}；provider 供界面选图标与文案
-    // （新手任务分组里 Loomy、小浣熊与 CodeArts 共用一张卡）。ZCode 额外带公开的
-    // `claimAt`（上次领取时间，与 checkinAt 同一处置：给原始时间戳，
-    // 不给布尔，见 zcode_accounts 的说明）。
-    let extra_rows = |provider: &str, with_claim_at: bool| -> Vec<Value> {
+    // 各家的账号行都是 {id, name, provider, settled}；provider 供界面选图标与文案
+    // （新手任务分组里 Loomy、小浣熊与 CodeArts 共用一张卡）。
+    //
+    // `settled` 是**一次性福利的结算记忆**（已结清才非空，形状三家一致，
+    // 见 `core::providers::onboarding_memory`）：与下面 CodeArts 行的 `welfare`
+    // 台账同一先例 —— 本地事实、零上游请求，界面据此直接渲染「已领取」并在
+    // 进页面 / 签到后跳过自动查询，不必为一条早就领完的福利反复问上游。
+    let onboarding_rows_of = |provider: &str| -> Vec<Value> {
         accounts
             .iter()
             .filter(|account| account_text(account, "provider") == provider)
             .map(|account| {
-                let mut row = json!({
-                    "id": account_text(account, "id"),
+                let id = account_text(account, "id");
+                json!({
+                    "id": id,
                     "name": Value::from(account_text(account, "name")),
                     "provider": provider,
-                });
-                if with_claim_at {
-                    if let Some(map) = row.as_object_mut() {
-                        map.insert(
-                            "claimAt".to_string(),
-                            account.get("claimAt").cloned().unwrap_or(Value::Null),
-                        );
-                    }
-                }
-                row
+                    "settled": super::onboarding::settled_view(state.store(), &id, provider)
+                        .unwrap_or(Value::Null),
+                })
             })
             .collect()
     };
@@ -202,10 +199,10 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // CodeArts 的账号在这里出现**不等于**它进每日签到链：本家仍不在
     // `auto_checkin` 的提供商清单里（那是后端的定时任务），签到中心「签到后自动
     // 补领」会替用户领这一条一次性新人礼 —— 领过之后上游不再回 claimable，
-    // 这条自动路径总共只发一次写请求（见 codearts::onboarding 的模块头）。
-    let mut onboarding_rows = extra_rows("loomy", false);
-    onboarding_rows.extend(extra_rows("raccoon", false));
-    onboarding_rows.extend(extra_rows("codearts", false));
+    // 而结算记忆一落，这条自动路径连查询都不再发（见 codearts::onboarding）。
+    let mut onboarding_rows = onboarding_rows_of("loomy");
+    onboarding_rows.extend(onboarding_rows_of("raccoon"));
+    onboarding_rows.extend(onboarding_rows_of("codearts"));
     // CodeArts 的福利行带**本地领取台账**（`account.welfare`）—— 与下面 ZCode 行
     // 带 `claimPlans` 同一个先例：台账是后端落盘的本地事实（day / accepted /
     // confirmed），带出来零上游请求，不违反「快照零上游」；界面的「已领取」

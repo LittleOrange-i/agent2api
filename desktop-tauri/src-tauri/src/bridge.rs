@@ -392,8 +392,13 @@ const BRIDGE_JS: &str = r#"
     // 签到完成后的配套动作：界面查询该账号的任务状态，有未领取的弹窗展示并领取
     // （见 ui-islands 的 accounts-dialog-onboarding）。与 `server/src/web_shim.rs`
     // 的同名方法成对维护（headless 面板同一份界面，缺一边会在那一形态下静默失效）。
-    getOnboardingTasks: id =>
-      call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding'),
+    //
+    // `refresh`：界面手点「查询任务」时传 true → 后端 `?refresh=1` 强制实查上游。
+    // 不带（进页面 / 签到后的自动补领）吃后端的**结算记忆** —— 一次性福利领完就
+    // 不再问上游（见 server 的 api::onboarding 模块说明）。
+    getOnboardingTasks: (id, refresh) =>
+      call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding'
+        + (refresh ? '?refresh=1' : '')),
     claimOnboardingTasks: id =>
       call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding/claim', {}),
 

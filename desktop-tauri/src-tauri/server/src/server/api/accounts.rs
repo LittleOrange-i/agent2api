@@ -60,7 +60,7 @@ use crate::server::core::providers::adapter::adapter_for;
 use crate::server::core::providers::zcode;
 use crate::server::core::providers::ProviderKind;
 use crate::server::errors::management_error;
-use crate::server::http::{ok_json, parse_body};
+use crate::server::http::{ok_json, parse_body, query_param};
 use crate::server::logging;
 use crate::server::ServerState;
 
@@ -310,11 +310,14 @@ pub async fn dispatch(
 
     // ③' GET + /onboarding 结尾 → 新手任务状态（只读，签到后弹窗的查询口）。
     // 与上面 POST 段同一写法：后缀互不包含，先后不影响命中。
+    // `?refresh=1` 强制实查上游（手点「查询任务」）；不带则吃结算记忆（一次性
+    // 福利领完就不再问上游，见 `api::onboarding` 的模块说明）。
     if method == Method::GET {
         if let Some(id) = rest.strip_suffix("/onboarding") {
             let id = decode_segment(id);
             if !id.is_empty() {
-                return super::onboarding::status(&state, &id).await;
+                let refresh = query_param(query, "refresh").as_deref() == Some("1");
+                return super::onboarding::status(&state, &id, refresh).await;
             }
         }
     }

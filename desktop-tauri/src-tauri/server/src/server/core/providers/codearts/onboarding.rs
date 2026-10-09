@@ -21,8 +21,8 @@
 //!   · 后端的定时签到（`auto_checkin` 的提供商清单）**不含本家** —— 那是无人看守的
 //!     动作，本家的每日福利本来也不走那条链（见 `core::billing::checkin` 的排除）；
 //!   · 面板上「签到后自动补领新手任务」**含本家**，与 Loomy / 小浣熊同构：领过之后
-//!     上游不再回 `claimable`，下一轮查询就是 `unclaimed=0`，此后每次签到都只是
-//!     签到 —— 自动补领在这里只会发**一次**写请求。
+//!     结清记忆一落（见 [`super::super::onboarding_memory`]），此后的查询与领取都
+//!     **零上游请求** —— 这条自动路径总共只发过一次写请求。
 //! 手点的「一键领取」仍然在，它和自动补领走的是同一个执行体。
 //!
 //! ── 面板上的「待领」为什么按 hasWork 数 ─────────────────────
@@ -34,6 +34,7 @@ use serde_json::{Value, json};
 
 use crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID;
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::providers::onboarding_memory;
 use crate::server::errors::GatewayError;
 
 use super::welfare::{self, Campaign};
@@ -84,6 +85,18 @@ fn unclaimed_of(rows: &[Value]) -> usize {
         .count()
 }
 
+/// 这条一次性福利**彻底结清**了没：清单非空且每一条都已到账。
+///
+/// 不能只看 `unclaimed == 0`：`blocked`（资格还没到、活动还没开始）的那些
+/// 既不算待领、也不算到账 —— 把它们当成结清，等于给一个将来可能变可领的活动
+/// 钉死「不会再变」的记忆，之后既不再查也领不到（见模块头的 `blocked` 说明）。
+fn all_settled(rows: &[Value]) -> bool {
+    !rows.is_empty()
+        && rows
+            .iter()
+            .all(|row| row.get("done").and_then(Value::as_bool) == Some(true))
+}
+
 /// 名义积分合计（已到账的算 earned、全部的算 total）—— 与 Loomy 同口径：
 /// 用**上游给的名义值**，不拿余额差值冒充到账数。
 fn points_sum(rows: &[Value], only_done: bool) -> f64 {
@@ -93,18 +106,81 @@ fn points_sum(rows: &[Value], only_done: bool) -> f64 {
         .sum()
 }
 
-/// `GET /api/accounts/{id}/onboarding` —— 只读：一次 `delivery`，零写请求。
-pub async fn get_tasks(store: &AccountStore, account_id: &str) -> Result<Value, GatewayError> {
+/// 状态响应里固定的那两项说明（记忆路径与实查路径共用一份文案）。
+const TASK_NOTE: &str = "一次性奖励：领一次就没了，且到账的是套餐赠送积分（不增加福利模型 token 池）";
+
+/// 把 provider / note 并进一份响应（记忆路径与实查路径共用）。
+fn with_meta(mut payload: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("provider".to_string(), json!(CODEARTS_PROVIDER_ID));
+        object.insert("note".to_string(), json!(TASK_NOTE));
+    }
+    payload
+}
+
+/// 记忆里的结算快照（没有 → None）。语义与写入口径见
+/// `providers::onboarding_memory`。
+fn settled_snapshot(store: &AccountStore, account_id: &str) -> Option<Value> {
+    onboarding_memory::snapshot(store.codearts_account_record(account_id).as_ref())
+}
+
+/// 签到时中心快照用：已结算就给一份可渲染的记忆（零上游），否则 None。
+pub fn settled_view(record: Option<&Value>) -> Option<Value> {
+    onboarding_memory::snapshot(record)
+}
+
+/// `GET /api/accounts/{id}/onboarding` —— 状态快照。
+///
+/// ── 一次性福利的记忆（`refresh = false` 时）───────────────────
+/// 结算过（见 `providers::onboarding_memory`）就直接用记忆回答，**零上游请求**
+/// —— 进签到中心不该为一条早就领完的福利反复查上游。手动「查询任务」按钮走
+/// `?refresh=1` 强制实查（拿到新事实时覆盖或清除记忆）。
+pub async fn get_tasks(
+    store: &AccountStore,
+    account_id: &str,
+    refresh: bool,
+) -> Result<Value, GatewayError> {
+    let previous = settled_snapshot(store, account_id);
+    if !refresh {
+        if let Some(snapshot) = previous.as_ref() {
+            return Ok(with_meta(onboarding_memory::serve(snapshot)));
+        }
+    }
     let items = welfare::newbie_gift(store, account_id, base()).await?;
     let rows: Vec<Value> = items.iter().map(task_row).collect();
-    Ok(json!({
+    // 上游这次一条新人礼都没回，而记忆里**有**已结算的结论 ⇒ 用记忆回答。
+    // 活动被领完之后从运营列表里消失是上游的正当行为（`CONSUMED` 之后不再下发），
+    // 那时实查得到一张空清单，而记忆才是这条福利的真实历史 —— 不回落到记忆会让
+    // 同一张卡片在「已领取一条」与「什么都没有」之间随刷新来回跳。
+    if rows.is_empty() {
+        if let Some(snapshot) = previous.as_ref() {
+            return Ok(with_meta(onboarding_memory::serve(snapshot)));
+        }
+    }
+    let unclaimed = unclaimed_of(&rows);
+    let mut payload = with_meta(json!({
         "tasks": rows,
         "earned": points_sum(&rows, true),
         "total": points_sum(&rows, false),
-        "unclaimed": unclaimed_of(&rows),
-        "provider": CODEARTS_PROVIDER_ID,
-        "note": "一次性奖励：领一次就没了，且到账的是套餐赠送积分（不增加福利模型 token 池）",
-    }))
+        "unclaimed": unclaimed,
+        // 界面据此判断「这条一次性福利到此为止」（`remember` 也按它落 / 清记忆）：
+        // 与 Loomy / 小浣熊同名字段，消费方不必按 provider 分叉。判据是
+        // `all_settled`（每一条都已到账）而不是 `unclaimed == 0` —— 后者会把
+        // `blocked` 的行误当成结清，见那里的说明。
+        "settled": all_settled(&rows),
+    }));
+    // 走到这里清单必然非空（空清单且无记忆 = 这账号压根没有新人礼，不该落记忆
+    // —— 那会让它此后永远不再实查；空清单但有记忆已在上面的回落里消化掉了）。
+    // `remember` 自己按 settled 决定写还是清，并把结算时刻补回响应（与记忆路径
+    // 的 `settledAt` 同义）。
+    onboarding_memory::remember(
+        store,
+        account_id,
+        "CodeArts",
+        &mut payload,
+        previous.as_ref(),
+    );
+    Ok(payload)
 }
 
 /// `POST /api/accounts/{id}/onboarding/claim` —— 领新人注册礼并回读确认。
@@ -112,7 +188,16 @@ pub async fn get_tasks(store: &AccountStore, account_id: &str) -> Result<Value, 
 /// 执行体是每日那条同一个（`welfare::claim_rewards`），差别只在挑哪一条活动。
 /// `manual = true`：这是用户手点的动作，不受「每天 6 次 / 间隔 10 分钟」那两道
 /// 保护无人值守重试的闸约束，但**资格每次仍从上游重读**。
+///
+/// ── 结算过就直接回答（零上游）───────────────────────────────
+/// 一次性福利没有再领一次的可能：记忆里已结算 ⇒ 不再打上游（`claim_all` 也是
+/// 签到后自动补领的执行体，那才是这条短路真正省下的请求）。要实查请走状态
+/// 查询的 `?refresh=1`，它会把新事实写回记忆（含"上游又出了新一期"的清账情形）。
 pub async fn claim_all(store: &AccountStore, account_id: &str) -> Result<Value, GatewayError> {
+    let previous = settled_snapshot(store, account_id);
+    if let Some(snapshot) = previous.as_ref() {
+        return Ok(settled_claim_response(snapshot));
+    }
     let now_ms = crate::server::logging::now_ms();
     let run = welfare::claim_rewards(
         store,
@@ -160,7 +245,8 @@ pub async fn claim_all(store: &AccountStore, account_id: &str) -> Result<Value, 
         })
         .collect();
     let claimed = landed.len();
-    Ok(json!({
+    let has_tasks = !rows.is_empty();
+    let mut payload = with_meta(json!({
         "results": results,
         "claimed": claimed,
         "failed": results.len() - claimed,
@@ -170,9 +256,31 @@ pub async fn claim_all(store: &AccountStore, account_id: &str) -> Result<Value, 
         "earned": points_sum(&rows, true),
         "total": points_sum(&rows, false),
         "unclaimed": unclaimed_of(&rows),
+        "settled": all_settled(&rows),
         "outcome": run.outcome.label(),
-        "provider": CODEARTS_PROVIDER_ID,
-    }))
+    }));
+    // 本轮确实有这一条活动 ⇒ 顺手同步记忆（判据与 `get_tasks` 同一把：非空才
+    // 记，`remember` 自己按 settled 决定写还是清）。`previous` 传 None 是确定的：
+    // 上面已有记忆就短路返回了，走到这里必然还没有快照，结算时刻按现在计。
+    if has_tasks {
+        onboarding_memory::remember(store, account_id, "CodeArts", &mut payload, None);
+    }
+    Ok(payload)
+}
+
+/// 记忆命中时领取接口的回答：这次**一次上游都没打**，因此没有一条 results。
+/// `outcome` 用「已领取并确认」—— 这是真话（记忆就是上游确认过的结论），
+/// 也正是界面希望看到的「别再点了」。
+fn settled_claim_response(snapshot: &Value) -> Value {
+    let mut payload = onboarding_memory::serve(snapshot);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("results".to_string(), json!([]));
+        object.insert("claimed".to_string(), json!(0));
+        object.insert("failed".to_string(), json!(0));
+        object.insert("claimedPoints".to_string(), json!(0));
+        object.insert("outcome".to_string(), json!(welfare::Outcome::Already.label()));
+    }
+    with_meta(payload)
 }
 
 #[cfg(test)]

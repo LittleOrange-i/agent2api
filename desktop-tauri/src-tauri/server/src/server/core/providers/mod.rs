@@ -118,6 +118,7 @@ pub mod content_block;
 pub mod custom;
 pub mod kuku;
 pub mod loomy;
+pub mod onboarding_memory;
 pub mod qoder;
 pub mod raccoon;
 pub mod refresh_flight;
