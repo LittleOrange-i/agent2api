@@ -82,7 +82,9 @@ export type CheckinCenterSnapshot = {
   }
   extras: {
     onboarding: Array<{ id: string; name: string; provider?: string }>
-    welfare: Array<{ id: string; name: string; provider?: string }>
+    /** CodeArts 福利行：`welfare` 是后端落盘的本地领取台账（day/accepted/…，原样透传），
+     *  「已领取」标记按它判（见 accounts-domain 的 welfareStateOf） */
+    welfare: Array<{ id: string; name: string; provider?: string; welfare?: unknown }>
     plans: Array<{ id: string; name: string; provider?: string; claimAt?: number | null; claimPlans?: Record<string, number> | null }>
   }
   auto: AutoCheckinState

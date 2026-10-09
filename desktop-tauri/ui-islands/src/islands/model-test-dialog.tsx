@@ -20,8 +20,10 @@
  * 每勾一个账号就并发发一次 `POST /api/models/test`（一个账号一条请求），后端把这一家与这一个
  * 账号**钉住**再走 `UpstreamService::forward` —— token 刷新、出站脱敏、提示词模式、思考等级注入、
  * 请求日志与调试报文全都覆盖到，所以结论与生产一致。也因此**会消耗少量额度**，且每次测试都带
- * 「测试」来源标记记入请求日志（报表统计里排除，见后端 `is_test`）。参数弹窗底部那行小字就是
- * 把这三件事说清。
+ * 「测试」来源标记记入请求日志（报表统计里排除，见后端 `is_test`）——这句压成一行常驻在参数弹窗
+ * 底部（额度必须看得见），其余解释各归其位：目标行 / 流式 / 账号的口径进 ⓘ（tip-q + Tooltip），
+ * 「留空则…」进 placeholder，页脚旁白与标题里重复的模型 ID 一律不摆。文案精简的对照与去向见
+ * prototype/model-test-lite.html。
  *
  * ── 中止：没有 abort 桥，靠同一个关联 id ──────────────────────
  * 桌面壳的桥（`invoke('api_request')`）**没有 abort**：一次已经在跑的调用取消不掉。所以 id 由
@@ -40,7 +42,7 @@ import * as React from 'react'
 import {
   Badge, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
   Label, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner,
-  Switch, Textarea,
+  Switch, Textarea, Tooltip, TooltipContent, TooltipTrigger,
 } from '@ui'
 import {
   DEFAULT_PROVIDER_ID, byPriorityOrder, displayNameOf, isRateLimited, positionMap, providerFeatures,
@@ -252,12 +254,17 @@ export function testBlockReason(provider: string, model: ManageModel): string {
 
 /* ─── 小件 ─────────────────────────────────── */
 
-/** 「本次将发 N 次…」那条口径说明（圈的用法与页面上其它提示一致：一个 i + 一句话） */
-function NoteBlock({ children }: { children: React.ReactNode }) {
+/** 「i + 一句话」提示（圈的用法与页面上其它提示一致）。box 是结果区的处置建议块；
+ *  plain 是参数弹窗底部的一行常驻口径 —— 精简文案后弹窗里唯一「必须看见」的说明（会消耗额度） */
+function NoteBlock({ children, plain = false }: { children: React.ReactNode; plain?: boolean }) {
   return (
-    <p className='flex gap-2 rounded-md border border-border bg-surface-2 px-3 py-2.5 text-xs leading-[1.65] text-subtle'>
+    <p className={plain
+      ? 'flex items-center gap-2 text-xs leading-[1.6] text-subtle'
+      : 'flex gap-2 rounded-md border border-border bg-surface-2 px-3 py-2.5 text-xs leading-[1.65] text-subtle'}>
       <span aria-hidden='true'
-        className='mt-px size-4 flex-none rounded-full border border-border-strong text-center text-[10px] leading-[14px]'>i</span>
+        className={plain
+          ? 'size-4 flex-none rounded-full border border-border-strong text-center text-[10px] leading-[14px]'
+          : 'mt-px size-4 flex-none rounded-full border border-border-strong text-center text-[10px] leading-[14px]'}>i</span>
       <span>{children}</span>
     </p>
   )
@@ -419,7 +426,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     return (
       <Dialog open onOpenChange={next => { if (!next) onClose() }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>测试模型{modelTag}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>测试模型</DialogTitle></DialogHeader>
           <DialogBody>
             <p className='text-sm leading-[1.7] text-subtle'>
               这一行已不在当前清单里（模型被移除、或目录刷新后上游不再提供它）。关闭后刷新列表再试。
@@ -446,6 +453,14 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   const levelOptions = reasoningLevels(getSnapshot().data)
     .filter(level => level !== 'off' && level !== 'none')
   const followLabel = boundLevel ? `跟随映射（当前 ${boundLevel}）` : '跟随映射（未绑定等级）'
+  /** 目标行 ⓘ 的口径：多数行没有别名 / 未绑等级，一句「以本名直发」就够 —— 说明悬停才见 */
+  const targetTip = [
+    '以默认绑定的名字直发',
+    aliases.length ? `另有 ${aliases.length} 条别名映射（${aliases.join('、')}），别名不参与本次` : '',
+    boundLevel
+      ? `映射上绑定的思考等级是 ${boundLevel}，「跟随映射」按它注入`
+      : '映射上未绑定思考等级，「跟随映射」等于这次不注入',
+  ].filter(Boolean).join('；') + '。'
   const accountOptions = usable.map(account => ({
     value: account.id,
     // 「限额中」按**这个模型**判（限额是按模型记的：一个账号可能对 A 模型限额、对 B 模型正常）
@@ -505,8 +520,9 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     const reply = String(result?.reply ?? '')
     const reasoningText = String(result?.reasoning ?? '')
     const foldKey = `think-${slot.testId}`
+    // 「上游 xxx」只在实际模型与被测名不同（映射改名）时才有信息量，同名不重复念一遍
     const metaLine = [
-      String(result?.upstream_model || target.id),
+      result?.upstream_model && result.upstream_model !== target.id ? `上游 ${result.upstream_model}` : '',
       result?.upstream_reasoning ? `思考等级 ${result.upstream_reasoning}` : '',
       Number(result?.attempts) > 1 ? `尝试 ${Number(result?.attempts)} 次` : '',
     ].filter(Boolean).join(' · ')
@@ -519,7 +535,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
         <div className='flex flex-col gap-2 px-3 py-2.5'>
           <div className='flex items-center gap-2 text-[11.5px] text-subtle'>
             <span className='flex-none'>回复</span>
-            <span className='min-w-0 truncate' title={metaLine}>上游 {metaLine}</span>
+            {metaLine ? <span className='min-w-0 truncate' title={metaLine}>{metaLine}</span> : null}
             {/* 复制走 clipboard.js 的全局委托（data-copy），与模型名那枚复制同一套 */}
             <Button variant='ghost' size='2xs' className='ml-auto flex-none' data-copy={reply}>复制</Button>
           </div>
@@ -549,10 +565,13 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
       const done = slots.length - slots.filter(slot => slot.state === 'running').length
       return (
         <>
-          <p className='text-xs text-subtle'>
-            正在测 <b className='text-foreground'>{slots.length}</b> 个账号（每个账号各发一次最小请求）
-            {done ? <>，已完成 <b className='text-foreground'>{done}</b></> : null}。
-          </p>
+          {/* 单账号时这行只是复述下面那块本身，省掉 */}
+          {slots.length > 1 ? (
+            <p className='text-xs text-subtle'>
+              正在测 <b className='text-foreground'>{slots.length}</b> 个账号
+              {done ? <>，已完成 <b className='text-foreground'>{done}</b></> : null}。
+            </p>
+          ) : null}
           {slots.map(slot => slotBlock(slot))}
         </>
       )
@@ -560,11 +579,13 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     const okCount = slots.filter(isOk).length
     return (
       <>
-        <p className='text-xs text-subtle'>
-          本次 <b className='text-foreground'>{slots.length}</b> 个账号：
-          <b className='text-foreground'>{okCount}</b> 成功 ·
-          <b className='text-foreground'> {slots.length - okCount}</b> 失败
-        </p>
+        {/* 单账号同上：结果块的徽章与指标已经说明一切；非 0 的读数才上色，注意力给问题 */}
+        {slots.length > 1 ? (
+          <p className='text-xs text-subtle'>
+            <b className={okCount ? 'text-success' : 'text-foreground'}>{okCount}</b> 成功 ·
+            <b className={slots.length - okCount ? 'text-destructive' : 'text-foreground'}> {slots.length - okCount}</b> 失败
+          </p>
+        ) : null}
         {slots.map(slot => slotBlock(slot))}
         {okCount === 0 ? (
           <NoteBlock>
@@ -586,42 +607,34 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
           <DialogTitle>测试模型{modelTag}</DialogTitle>
         </DialogHeader>
         <DialogBody>
-          {/* 目标行：测的是哪一条（与「模型能力」弹窗的预览行同一用意） */}
-          <div className='flex flex-col gap-2'>
-            <div className='flex items-center gap-2 rounded-md border border-border bg-surface-inset px-3 py-2.5'>
-              <span className='min-w-0 flex-1 truncate font-mono text-[12.5px] font-semibold text-primary-fg'
-                title={model.id}>{model.id}</span>
-              <Badge shape='tag' variant='brand'>{providerLabelOf(provider)}</Badge>
-              <Badge shape='tag' variant='outline'>
-                {customSource.isCustom(provider) ? '自定义家' : (SOURCE_LABEL[model.source] || '来源未知')}
-              </Badge>
-            </div>
-            <p className='text-xs leading-[1.65] text-subtle'>
-              本次以默认绑定的名字 <code className='text-foreground'>{model.id}</code> 发出去
-              {aliases.length
-                ? `（这一行另有 ${aliases.length} 条别名映射：${aliases.join('、')}，别名不参与本次测试）`
-                : ''}
-              ；映射上绑定的思考等级{boundLevel
-                ? <> 是 <b className='text-foreground'>{boundLevel}</b>，选「跟随映射」时按它注入</>
-                : '未绑定 —— 选「跟随映射」等于这次不注入等级'}。
-            </p>
+          {/* 目标行：测的是哪一条（与「模型能力」弹窗的预览行同一用意）；发送口径收进行尾 ⓘ，不再常驻一段 */}
+          <div className='flex items-center gap-2 rounded-md border border-border bg-surface-inset px-3 py-2.5'>
+            <span className='min-w-0 flex-1 truncate font-mono text-[12.5px] font-semibold text-primary-fg'
+              title={model.id}>{model.id}</span>
+            <Badge shape='tag' variant='brand'>{providerLabelOf(provider)}</Badge>
+            <Badge shape='tag' variant='outline'>
+              {customSource.isCustom(provider) ? '自定义家' : (SOURCE_LABEL[model.source] || '来源未知')}
+            </Badge>
+            <Tooltip>
+              <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label='本次测试的发送口径' />}>?</TooltipTrigger>
+              <TooltipContent>{targetTip}</TooltipContent>
+            </Tooltip>
           </div>
 
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='model-test-system'>系统提示词</Label>
             <Textarea id='model-test-system' rows={2} maxLength={MAX_PROMPT_CHARS}
-              placeholder='留空则本次不额外携带系统提示词（设置页的提示词模式仍按原样生效）'
+              placeholder='留空则不携带；设置页的提示词模式照常生效'
               value={systemPrompt}
               onChange={event => setSystemPrompt(event.currentTarget.value)} />
-            <span className='text-xs text-subtle'>留空 = 请求里只有下面那条用户消息；填了则排在它前面。</span>
           </div>
 
           <div className='flex flex-col gap-1.5'>
             <Label htmlFor='model-test-prompt'>用户提示词</Label>
             <Textarea id='model-test-prompt' rows={2} maxLength={MAX_PROMPT_CHARS}
+              placeholder='留空用默认问候「你好」'
               value={prompt}
               onChange={event => setPrompt(event.currentTarget.value)} />
-            <span className='text-xs text-subtle'>留空则用默认的一句问候（最小请求）。</span>
           </div>
 
           <div className='grid grid-cols-2 gap-4'>
@@ -640,23 +653,29 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
               </Select>
             </div>
             <div className='flex flex-col gap-1.5'>
-              <Label htmlFor='model-test-stream'>流式请求</Label>
-              <div className='flex items-center gap-2'>
-                <Switch id='model-test-stream' checked={stream}
-                  onCheckedChange={value => setStream(Boolean(value))} />
-                <span className='text-xs text-subtle'>默认开，与真实请求一致：能同时验证 SSE 链路与首字延迟</span>
+              <div className='flex items-center gap-1.5'>
+                <Label htmlFor='model-test-stream'>流式请求</Label>
+                <Tooltip>
+                  <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label='流式请求的说明' />}>?</TooltipTrigger>
+                  <TooltipContent>默认开，与真实请求一致：可同时验证 SSE 链路与首字延迟。</TooltipContent>
+                </Tooltip>
               </div>
+              <Switch id='model-test-stream' checked={stream}
+                onCheckedChange={value => setStream(Boolean(value))} />
             </div>
           </div>
 
           <div className='flex flex-col gap-1.5'>
             <div className='flex items-center gap-2'>
               <Label htmlFor='model-test-accounts'>测试账号</Label>
-              <span className='text-xs text-subtle'>（勾几个就并行测几次；默认勾队列里最靠前的那个）</span>
+              <Tooltip>
+                <TooltipTrigger render={<span className='tip-q' tabIndex={0} aria-label='测试账号的说明' />}>?</TooltipTrigger>
+                <TooltipContent>勾几个就并行测几次；默认选队列里最靠前的一个。</TooltipContent>
+              </Tooltip>
               <Button variant='ghost' size='xs' className='ml-auto'
                 disabled={!usable.length || picked.length === usable.length}
                 onClick={() => setPicked(usable.map(account => account.id))}>
-                勾全部启用（{usable.length}）
+                全选（{usable.length}）
               </Button>
             </div>
             <MultiSelect id='model-test-accounts' value={picked} onValueChange={setPicked}
@@ -665,15 +684,9 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
               emptyHint='这家没有可用账号（要在账号页启用一个、且凭证完整）' />
           </div>
 
-          <NoteBlock>
-            本次将发 <b className='text-foreground'>{picked.length}</b> 次最小请求
-            （{picked.length} 个账号 × 1 个模型），走真实转发链路、
-            <b className='text-foreground'>会消耗少量额度</b>；每次测试带「测试」来源标记记入请求日志，
-            <b className='text-foreground'>不计入报表统计</b>。
-          </NoteBlock>
+          <NoteBlock plain>真实链路 · 消耗少量额度 · 日志带「测试」标记，不计报表</NoteBlock>
         </DialogBody>
-        <DialogFooter>
-          <span className='mr-auto text-xs text-subtle'>开始后结果会在上一层弹窗里给出，按账号分开列。</span>
+        <DialogFooter className='justify-end'>
           <Button variant='outline' onClick={onClose}>关闭</Button>
           <Button variant='default' disabled={!picked.length || !usable.length} onClick={run}>开始测试</Button>
         </DialogFooter>
@@ -685,20 +698,15 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
               <DialogTitle>{running ? '测试中…' : '测试结果'}{modelTag}</DialogTitle>
             </DialogHeader>
             <DialogBody>{results()}</DialogBody>
-            <DialogFooter>
+            <DialogFooter className='justify-end'>
               {running ? (
                 <>
-                  <span className='mr-auto text-xs text-subtle'>关掉这层 = 中止在途请求，不会继续占上游额度。</span>
+                  <span className='mr-auto text-xs text-subtle'>关闭即中止</span>
                   <Button variant='outline' onClick={() => abort()}>中止测试</Button>
                   <Button variant='default' disabled>测试中…</Button>
                 </>
               ) : (
                 <>
-                  <span className='mr-auto text-xs text-subtle'>
-                    {slots.some(slot => !isOk(slot))
-                      ? '每个账号按各自的原因给下一步；改参数请关掉这层。'
-                      : '结果按账号分开：谁通谁不通一眼可辨。'}
-                  </span>
                   <Button variant='outline' onClick={closeResults}>关闭</Button>
                   <Button variant='default' onClick={run}>再测一次</Button>
                 </>

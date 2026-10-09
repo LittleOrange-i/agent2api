@@ -5,7 +5,7 @@ import {
 } from '@ui'
 import { PROVIDER_ICONS } from './add-provider-pick'
 import { formatTime, shared, type OnboardingTask } from './accounts-shared'
-import { claimedPlanIdsToday } from './accounts-domain'
+import { claimedPlanIdsToday, welfareDoneTitle, welfareStateOf, welfareTodoTitle } from './accounts-domain'
 import {
   claimOnboarding, getCheckinStore, groupTone, historyLine, loadCheckinCenter,
   nextRunText, onboardingExpanded, queryOnboarding, runAllCheckin, saveAutoCheckin,
@@ -304,11 +304,25 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
   )
 }
 
-/** 活动福利一行（CodeArts / ZCode；领取沿用既有流程，本页只提供入口） */
+/**
+ * 活动福利一行（CodeArts / ZCode；领取沿用既有流程，本页只提供入口）。
+ *
+ * ── 「已领取」标记（CodeArts）───────────────────────────────
+ * 快照的福利行带着本地领取台账（`row.welfare`，后端 checkin_center 落盘事实），
+ * 用账号页同款的 `welfareStateOf` 判「今天已领取且已受理」—— 判据只有一处，
+ * 两页不会一个说领了一个说没领。已领时按钮置灰、行上加绿徽章：再点也只是
+ * 让后端回一句「已领取并确认」，留着可点会让人以为还能再领一次。
+ * **试过但没到账不置灰**：手动点击在后端是绕过限流闸的，重试不会变成第二笔领取。
+ * ZCode 那行的领取状态本来就是逐份的（claimPlans），交给领取弹窗自己标，行上不动。
+ */
 function WelfareRow({ row, kind }: {
-  row: { id: string; name: string; claimAt?: number | null; claimPlans?: Record<string, number> | null }
+  row: { id: string; name: string; welfare?: unknown; claimAt?: number | null; claimPlans?: Record<string, number> | null }
   kind: 'welfare' | 'plan'
 }) {
+  const state = kind === 'welfare'
+    ? welfareStateOf({ welfare: row.welfare } as never)
+    : null
+  const taken = state !== null && state.today && state.accepted
   /** 领取完成后刷新快照与主状态（账号页的余额读数也在那一轮里跟上） */
   const start = async () => {
     const account = { id: row.id, name: row.name }
@@ -326,19 +340,30 @@ function WelfareRow({ row, kind }: {
     <div className='ck-welfare-row'>
       <ProviderLogo id={kind === 'welfare' ? 'codearts' : 'zcode'} label={kind === 'welfare' ? 'CodeArts' : 'ZCode'} />
       <div className='ck-prov-info'>
-        <div className='ck-prov-name'>{row.name || row.id}</div>
+        <div className='ck-prov-name'>
+          {row.name || row.id}
+          {taken ? <Badge variant='success' shape='tag' title={welfareDoneTitle(state!)}>已领取</Badge> : null}
+        </div>
         <div className='ck-prov-desc'>
           {kind === 'welfare'
-            ? '运营活动交付（领取 → 确认 → 回读核实）· 领的是套餐赠送积分'
+            ? taken
+              ? `今天（北京时间 ${state!.day}）已领取 · 官方确认到账 ${state!.confirmed} 项 · 明天可再领`
+              : '运营活动交付（领取 → 确认 → 回读核实）· 领的是套餐赠送积分'
             : row.claimAt
               ? `上次领取 ${formatTime(row.claimAt)} · 领取需通过滑块验证码`
               : '限时体验套餐（start-plan），活动期内每天一份 · 领取需滑块验证码'}
         </div>
       </div>
       <div className='ck-prov-right'>
-        <Button size='sm' variant='outline' onClick={() => void start()}>
-          {kind === 'welfare' ? '去领取' : '去领取（需验证码）'}
-        </Button>
+        {kind === 'welfare' && taken ? (
+          <Button size='sm' variant='outline' disabled title={welfareDoneTitle(state!)}>已领取</Button>
+        ) : (
+          <Button size='sm' variant='outline'
+            title={state && !taken ? welfareTodoTitle(state) : undefined}
+            onClick={() => void start()}>
+            {kind === 'welfare' ? '去领取' : '去领取（需验证码）'}
+          </Button>
+        )}
       </div>
     </div>
   )

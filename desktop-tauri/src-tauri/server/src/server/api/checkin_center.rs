@@ -33,8 +33,8 @@
 //!   },
 //!   "extras": {
 //!     "onboarding": [ { "id", "name", "provider" } ],
-//!     "welfare":    [ { "id", "name", "provider" } ],
-//!     "plans":      [ { "id", "name", "provider", "claimAt" } ]
+//!     "welfare":    [ { "id", "name", "provider", "welfare" } ],
+//!     "plans":      [ { "id", "name", "provider", "claimAt", "claimPlans" } ]
 //!   },
 //!   "auto": { …与 GET /api/auto-checkin 同形… },
 //!   "history": [ { "at", "date", "reason", "succeeded", "total", "skipped",
@@ -203,7 +203,22 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // （api::onboarding）。
     let mut onboarding_rows = extra_rows("loomy", false);
     onboarding_rows.extend(extra_rows("raccoon", false));
-    let welfare_rows = extra_rows("codearts", false);
+    // CodeArts 的福利行带**本地领取台账**（`account.welfare`）—— 与下面 ZCode 行
+    // 带 `claimPlans` 同一个先例：台账是后端落盘的本地事实（day / accepted /
+    // confirmed），带出来零上游请求，不违反「快照零上游」；界面的「已领取」
+    // 标记按它判（北京时间的日界判定在前端 `welfareStateOf`，不在后端再抄一份）。
+    let welfare_rows: Vec<Value> = accounts
+        .iter()
+        .filter(|account| account_text(account, "provider") == "codearts")
+        .map(|account| {
+            json!({
+                "id": account_text(account, "id"),
+                "name": Value::from(account_text(account, "name")),
+                "provider": "codearts",
+                "welfare": account.get("welfare").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
     let plan_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {

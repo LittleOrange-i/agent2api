@@ -724,7 +724,8 @@ export const PROXY_CUSTOM_EDIT = '__proxy_custom_edit__'
  * 领到的是 token 额度：余额列的读数立刻就变了，而那颗按钮的悬停提示也跟着变
  * （后端落的领取台账由重拉账号拿到）。两件事都是本页的 store / 动作
  * （legacy 脚本拿不到），所以脚本只把结果交回来，由这里刷新 ——
- * 与 CodeArts 那条（脚本自己调 `wbApp.refresh()`）不同，是因为这条还得顺带刷余额。
+ * 与 CodeArts 那条不同（它的入口在签到中心，脚本领完自己调 `wbApp.refresh()`），
+ * 是因为这条还得顺带刷本页的余额。
  *
  * `already_claimed` 同样算「已领」：上游说这份套餐已经被领掉了（可能是另一台
  * 设备领的），台账该补上它，否则用户会一直点它、每次拿回同一句话。
@@ -745,16 +746,10 @@ export async function startZcodeClaim(id: string): Promise<void> {
 }
 
 /**
- * CodeArts 的「领福利」：整条流程（只读探测 → 用户确认 → 领取 → 等官方回读）
- * 住在 legacy 脚本 `ui/codearts-welfare.js` 里，这里只把账号对象递过去。
- *
- * 与上面那颗「领套餐」是**两件事**（判据位 `welfare` vs `claim`、本家不要验证码、
- * 端点也不同），所以是另一个全局对象而不是 `wbZcodeClaim` 的一个参数。
- * 台账刷新由那侧负责（它领完自己调 `wbApp.refresh()`）。
+ * CodeArts 的「领福利」入口已整体迁到「签到中心」的活动福利卡（checkin-page.tsx
+ * 直接调 legacy 脚本 `ui/codearts-welfare.js` 的 `wbCodeArtsWelfare.start`），
+ * 账号页不再有这颗按钮 —— 这里不再中转。
  */
-export async function startCodeArtsWelfare(id: string): Promise<void> {
-  await shared().wbCodeArtsWelfare?.start?.(findAccount(id) || undefined)
-}
 
 /* ─── 对外契约（window）────────────────────── */
 

@@ -54,11 +54,16 @@ type ProviderFeatures = {
    */
   planChannel?: boolean
   /**
-   * 有没有「领福利」这个动作（只有 CodeArts）。**刻意不与 ZCode 的 `claim` 合并**：
-   * 那家的领取要过一次阿里云验证码、且判据看后端给的 `canClaim`（账号得带套餐令牌），
-   * 本家两样都没有 —— 共用一个位会让两边的按钮判据互相污染。
+   * 余额列要不要用「套餐徽标 + 点击明细弹层」的两行形态（只有 CodeArts）。
+   *
+   * 本家的余额是**两台网关、两组口径**（订阅统计的积分类计量表 + 福利网关的
+   * token 池，见后端 `providers::codearts::balance` 的模块头），一行「可用 N 积分」
+   * 是各池剩余的加总 —— 两个权益不同的账号（试用版 / 免费版）在列里长得一样，
+   * 构成只有弹层才放得下。别的家的 wallets 形状不同（ZCode 走 usage-pool 两行、
+   * Loomy 双账户一行就够），按能力位开关而不是形状探测：弹层是**交互承诺**
+   * （点开一定有逐项读数），形状探测会让没把握的家也变成可点。
    */
-  welfare?: boolean
+  usageDetail?: boolean
   /**
    * 这一家「并发上限」的默认值（>0 = 本家**没有**「不限」这一档）。
    * CodeArts 的 3 是上游硬顶（超过直接回 HTTP 400，且那是账号级冲突、不降级换号），
@@ -120,13 +125,16 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // `usage: true` —— 余额是**两份账**（订阅统计 + 福利网关，见 providers::codearts::balance），
   //   界面上「读到 0」与「没读到」必须能分开，后端因此把失败的一侧写进 statisticsError /
   //   benefitError 而不是整次失败（半次失败的呈现见 accounts-panels 的 usageSummary）。
-  // `welfare: true` —— 本家的运营动作是 ops 福利领取（探测 → 确认 → 领取 → 回读
-  //   二次确认），是用户点一下才走的独立按钮。
+  // `usageDetail: true` —— 余额列的明细弹层形态（套餐徽标 + 点击逐项读数）：本家
+  //   的计量表一行放不下，「可用 N 积分」是加总，两个权益不同的账号看不出差别。
+  // 「领福利」不在能力表里：入口已整体迁到「签到中心」（api::checkin_center 按
+  //   provider 组装福利行，ui/codearts-welfare.js 的流程两边共用），账号页不再有
+  //   这颗按钮 —— 判据只留后端一处，界面不再查表。
   // `edition: false` —— 没有版本/地区概念：region 固定在 cn-north-4 且必须与 token
   //   签发地一致，不是用户可选项；`login_type`（WEB/IDE）也不是版本，别塞进这一列。
   // `expiry: 'expiresAt'` —— 临时凭据约一小时到期，这一列对本家**是主要信息**。
   codearts: {
-    usage: true, welfare: true, edition: false,
+    usage: true, usageDetail: true, edition: false,
     identifier: 'userId', expiry: 'expiresAt',
     concurrencyDefault: 3,
   },
@@ -348,8 +356,14 @@ export function lowBalanceBlockedOf(
   if (!entry || typeof entry !== 'object') return false
   const data = entry as Record<string, unknown>
   if (data.unlimited) return false
-  // 数字口径与余额列同源：workbuddy 既有形状 totalLeft，其余 available
-  const remaining = Number(data.totalLeft ?? data.available)
+  // 数字口径与余额列同源：workbuddy 既有形状 totalLeft，其余 available。
+  // **null/undefined 必须显式拦下**：`Number(null)` 是 0（不是 NaN），照直转会把
+  // 「没有积分类读数」（CodeArts 免费版账号的统计里没有积分类计量表、available
+  // 为 null，额度全在福利 token 池）判成「余额为 0」—— 徽章亮起来、用户去查一个
+  // 不存在的问题，而它恰恰违反了上面「拿不出证据就不亮徽章」的口径。
+  const raw = data.totalLeft ?? data.available
+  if (raw === null || raw === undefined || raw === '') return false
+  const remaining = Number(raw)
   return Number.isFinite(remaining) && remaining < threshold
 }
 
@@ -508,14 +522,24 @@ export function claimDoneTitle(account: AccountRecord | null | undefined): strin
 }
 
 /**
- * 本家有没有「领福利」这个动作。
- *
- * 只看能力位，**没有**第二道 `canClaim` 判据：ZCode 那道闸是因为它的账号可能
- * 只粘了转发用的 accessToken、没有套餐令牌；CodeArts 的领取用的就是账号自己那份
- * 凭据，能路由就一定能领（真领不了由后端如实报错）。
+ * 余额列要不要走「套餐徽标 + 点击明细弹层」的两行形态（见 ProviderFeatures.usageDetail）。
  */
-export function supportsWelfare(account: AccountRecord | null | undefined): boolean {
-  return Boolean(providerFeatures(providerOf(account)).welfare)
+export function supportsUsageDetail(account: AccountRecord | null | undefined): boolean {
+  return Boolean(providerFeatures(providerOf(account)).usageDetail)
+}
+
+/**
+ * 上游套餐名 → 界面徽标文案。
+ *
+ * 后端 `plan_name` 取 `package_name_en` 优先（见 balance.rs），本家现网给过
+ * `Trial` / `Free`；中文文案按账号页的措辞习惯映射，认不出的名字原样显示
+ * （宁显原名不编中文 —— 与 `quota_meter_label` 的回落同一取向）。
+ */
+export function planBadgeLabel(planName: unknown): string {
+  const name = String(planName ?? '').trim()
+  if (/^trial$/i.test(name)) return '试用版'
+  if (/^free$/i.test(name)) return '免费版'
+  return name
 }
 
 /**
@@ -531,7 +555,10 @@ export function beijingDay(at: number = Date.now()): string {
   return new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
-/** 领取台账 → 按钮要用的读数（后端写在 `account.welfare` 上） */
+/**
+ * 领取台账 → 「已领取了吗」的读数（后端写在 `account.welfare` 上；签到中心的
+ * 福利行从快照里拿到同一份台账后，用 `{ welfare: row.welfare }` 复用本函数）。
+ */
 export type WelfareState = { known: boolean; today: boolean; day: string; accepted: boolean; attempts: number; confirmed: number }
 
 /**
@@ -566,16 +593,16 @@ export function welfareStateOf(account: AccountRecord | null | undefined): Welfa
   return state.today ? state : { ...empty, known: true }
 }
 
-/** 「已领」的悬停说明：说清哪一天、领到哪一份额度、什么时候能再领。 */
+/** 「已领取」的悬停说明：说清哪一天、领到哪一份额度、什么时候能再领。（签到中心的福利行用它） */
 export function welfareDoneTitle(state: WelfareState): string {
   // 「不增加福利模型的 token 池」是**故意留在这里**的：这一家有两份账，领到的积分进的
   // 是套餐赠送积分，而用户点完最可能问的下一句就是「那我的福利模型怎么还是没额度」——
-  // 答案放在这颗按钮的悬停里，不必再去余额列上猜（后端 usage 文档的 note 同口径）。
+  // 答案放在这行说明里，不必再去余额明细里猜（后端 usage 文档的 note 同口径）。
   return `今天（北京时间 ${state.day}）已由官方确认到账 ${state.confirmed} 项；`
     + '领到的是套餐赠送积分，不增加福利模型的 token 池；按自然日重置，明天可再领'
 }
 
-/** 「领福利」的悬停说明：把台账里已有的读数带上，回答「今天第几次了」。 */
+/** 「去领取」的悬停说明：把台账里已有的读数带上，回答「今天第几次了」。 */
 export function welfareTodoTitle(state: WelfareState): string {
   const tried = state.today && state.attempts > 0
     ? `今天（北京时间 ${state.day}）已试过 ${state.attempts} 次但官方尚未确认到账，`

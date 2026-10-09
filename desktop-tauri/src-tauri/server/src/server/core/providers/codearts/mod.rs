@@ -496,6 +496,33 @@ impl ProviderAdapter for CodeArtsAdapter {
                 chat::DEFAULT_PLUGIN_VERSION,
             )
             .await;
+            // ── 「无 benefit 档案」先自动注册一次再重查 ─────────────────
+            // benefit 记录不是开账号就有的：官方客户端每次启动都 POST claim
+            // （幂等建档，见 `balance::claim_benefit` 的模块注释），没走过这一步
+            // 的账号 InferHub 一律 `4004.200 benefit not found` 拒答。官方客户端
+            // 「登录用一下就好了」正是这条在起作用 —— 余额查询是每分钟自动跑的，
+            // 把注册挂在这里，新账号在一次查询内自愈，不必再借官方客户端渡一次。
+            // 去抖：注册是写语义的幂等调用，没必要每分钟补一发（10 分钟一次足够）。
+            let mut benefit = benefit;
+            if matches!(&benefit, Ok(None)) && benefit_claim_due(account_id) {
+                match balance::claim_benefit(models::DEFAULT_BENEFIT_GATEWAY_URL, &credential).await {
+                    Ok(_) => {
+                        benefit = balance::fetch_benefit_balance(
+                            models::DEFAULT_BENEFIT_GATEWAY_URL,
+                            &credential,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        // 注册失败（网络/签名/上游）不该把「无档案」升级成整次失败：
+                        // 下一轮余额查询会再试（去抖窗过后）。原样保留 absent 结果。
+                        crate::server::logging::verbose(
+                            "[CodeArts]",
+                            &format!("benefit 自动注册失败（账号 {account_id}）：{}", error.message),
+                        );
+                    }
+                }
+            }
             // 两边都失败才算整次失败（一边失败不抹掉另一边）。
             // 注意「无福利」（`Ok(None)`）不是失败 —— 它是账号的正常状态
             // （福利按活动下发，Free 账号常常没有），见 balance.rs 的
@@ -640,6 +667,30 @@ fn record_proxy(
 async fn proxy_and_fresh(store: &AccountStore, account_id: &str) -> Result<credentials::Credential, GatewayError> {
     let proxy = record_proxy(store, account_id)?;
     refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await
+}
+
+/// benefit 自动注册（claim）的**进程级去抖**：距上次尝试不足窗口期返回 false。
+///
+/// 自动余额查询默认每分钟跑一次，「无档案」的账号若不加去抖就会每分钟被补发一次
+/// claim —— 调用幂等但没必要（官方客户端也就是每次启动一发）。10 分钟取的是
+/// 「自愈要快，但也不在网关故障时把节奏打满」的中间值；表只增不减，量级就是
+/// 本机的 CodeArts 账号数，不值得做清理。返回 true 表示这次该发（并记下时刻）。
+fn benefit_claim_due(account_id: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    const WINDOW: Duration = Duration::from_secs(600);
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match map.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.get(account_id).is_some_and(|at| at.elapsed() < WINDOW) {
+        return false;
+    }
+    guard.insert(account_id.to_string(), Instant::now());
+    true
 }
 
 /// 把上游原文拼成统一文案的一截（空则不拼）。
