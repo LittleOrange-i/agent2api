@@ -66,7 +66,8 @@ const AUTO_CHECKIN_DESC =
 
 /** 新手任务分组的提供商展示名（缺省回落 provider id 本身） */
 function onboardingProviderLabel(provider: string): string {
-  return provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy' : provider
+  return provider === 'raccoon' ? '小浣熊' : provider === 'loomy' ? 'Loomy'
+    : provider === 'codearts' ? 'CodeArts' : provider
 }
 
 function useCheckinStore(): CheckinStore {
@@ -292,9 +293,11 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
                   ? <Badge variant='warning' shape='tag'>领取中</Badge>
                   : task.done
                     ? <Badge variant='success' shape='tag'>已领取</Badge>
-                    : task.error
-                      ? <Badge variant='destructive' shape='tag'>{task.error}</Badge>
-                      : <Badge variant='brand' shape='tag'>可领取</Badge>}
+                    : task.blocked
+                      ? <Badge variant='outline' shape='tag'>暂不可领</Badge>
+                      : task.error
+                        ? <Badge variant='destructive' shape='tag'>{task.error}</Badge>
+                        : <Badge variant='brand' shape='tag'>可领取</Badge>}
               </span>
             </div>
           ))}
@@ -664,7 +667,7 @@ function CheckinPage() {
               {(daily?.outOfScope ?? []).length > 0 ? (
                 <div className='ck-fold-note'>
                   不参与每日签到：{daily!.outOfScope.map(item => `${item.label} ×${item.count}（${item.reason}）`).join('；')}
-                  。CodeArts 与 ZCode 的福利领取见下方「活动福利」。
+                  。CodeArts 的一次性奖励在上方「新手任务」，它与 ZCode 的每日/套餐福利领取见下方「活动福利」。
                 </div>
               ) : null}
             </div>
@@ -673,7 +676,9 @@ function CheckinPage() {
           <section className='panel'>
             <div className='panel-head'>
               <h2>新手任务</h2>
-              <span className='panel-sub'>一次性福利 · 签到后自动查询并领取 · 点击行展开任务清单</span>
+              <span className='panel-sub'>
+                一次性福利 · 签到后自动查询并领取（领过之后就不再发写请求）· 点击行展开任务清单
+              </span>
               {onboardingRows.length > 0 ? (
                 <Button
                   size='sm'
@@ -690,7 +695,7 @@ function CheckinPage() {
                 {onboardingRows.map(row => <OnboardingRow key={row.id} row={row} />)}
               </div>
             ) : (
-              <div className='ck-tl-empty'>没有支持新手任务的账号 —— 目前有 Loomy、小浣熊两家。</div>
+              <div className='ck-tl-empty'>没有支持新手任务的账号 —— 目前有 Loomy、小浣熊、CodeArts 三家。</div>
             )}
           </section>
 

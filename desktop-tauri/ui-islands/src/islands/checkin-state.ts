@@ -225,6 +225,7 @@ function normalizeTask(raw: OnboardingTaskRaw): OnboardingTask | null {
     group: typeof raw.group === 'string' && raw.group ? raw.group : '',
     points: Number(raw.points) || 0,
     done: raw.done === true,
+    blocked: raw.blocked === true,
   }
 }
 
@@ -487,6 +488,14 @@ export async function submitKeepaliveModels(value: string): Promise<void> {
  * 全部领完后查询结果 unclaimed=0，之后签到就只是签到。逐账号串行
  * （与签到同一条防风控口径），单账号查询失败不拖累其它账号。
  *
+ * ── CodeArts 为什么也在自动补领里 ──────────────────────────
+ * 它的新手任务只有「新人注册礼」这一条，且是**一次性**的：领过一次之后上游就
+ * 不再回 `claimable`，于是下一轮查询的 `unclaimed=0`，之后每次签到都只是签到
+ * —— 自动补领在这里只会发一次写请求，与 Loomy 同构。
+ * 边界仍然留着：本家**不进** `auto_checkin` 的提供商清单（那是后端的定时任务，
+ * 无人看守），这里的"自动"只发生在用户刚点过签到之后。另外两类一次性活动
+ * （学生认证 / 邀请礼）连入口都没有，判据见 `Campaign::is_newbie_gift`。
+ *
  * `rows` 传快照的 `extras.onboarding`（全部支持新手任务的账号）；单账号签到时
  * 传只含该账号的数组（用户点的是谁就处理谁）。领取完成后 claimOnboarding
  * 内部会重拉快照，「待领新手任务」总览卡随之归零。
@@ -533,7 +542,9 @@ export async function queryOnboarding(id: string, options?: { expand?: boolean }
       status: 'loaded',
       checkedAt: Date.now(),
       tasks,
-      unclaimed: tasks.filter(task => !task.done).length,
+      // blocked（前置没满足，如 CodeArts 新人礼未到门槛）不算待领：把它们计入
+      // 待领数会让「一键领取（N）」承诺一件点成失败的事，而一次性的东西失败不起
+      unclaimed: tasks.filter(task => !task.done && !task.blocked).length,
       earned: numberOf(data?.earned),
       total: numberOf(data?.total),
     })
@@ -579,7 +590,7 @@ export async function claimOnboarding(id: string): Promise<void> {
       claiming: false,
       checkedAt: Date.now(),
       tasks: merged,
-      unclaimed: merged.filter(task => !task.done).length,
+      unclaimed: merged.filter(task => !task.done && !task.blocked).length,
       earned: numberOf(data?.earned),
       total: numberOf(data?.total),
     })

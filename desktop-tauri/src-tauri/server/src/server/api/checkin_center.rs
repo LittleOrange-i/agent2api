@@ -173,7 +173,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
 
     // ── 一次性 / 手动项的账号入口清单（资格状态由前端惰性查询）──
     // 各家的账号行都是 {id, name, provider}；provider 供界面选图标与文案
-    // （新手任务分组里 Loomy 与小浣熊共用一张卡）。ZCode 额外带公开的
+    // （新手任务分组里 Loomy、小浣熊与 CodeArts 共用一张卡）。ZCode 额外带公开的
     // `claimAt`（上次领取时间，与 checkinAt 同一处置：给原始时间戳，
     // 不给布尔，见 zcode_accounts 的说明）。
     let extra_rows = |provider: &str, with_claim_at: bool| -> Vec<Value> {
@@ -198,11 +198,15 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             })
             .collect()
     };
-    // 新手任务分组：Loomy（任务表）+ 小浣熊（首次桌面登录奖励，见
-    // `providers::raccoon::onboarding`），执行体按 provider 分派
-    // （api::onboarding）。
+    // 新手任务分组：Loomy（任务表）+ 小浣熊（首次桌面登录奖励）+ CodeArts
+    // （运营活动里的新人注册礼那一条），执行体按 provider 分派（api::onboarding）。
+    // CodeArts 的账号在这里出现**不等于**它进每日签到链：本家仍不在
+    // `auto_checkin` 的提供商清单里（那是后端的定时任务），签到中心「签到后自动
+    // 补领」会替用户领这一条一次性新人礼 —— 领过之后上游不再回 claimable，
+    // 这条自动路径总共只发一次写请求（见 codearts::onboarding 的模块头）。
     let mut onboarding_rows = extra_rows("loomy", false);
     onboarding_rows.extend(extra_rows("raccoon", false));
+    onboarding_rows.extend(extra_rows("codearts", false));
     // CodeArts 的福利行带**本地领取台账**（`account.welfare`）—— 与下面 ZCode 行
     // 带 `claimPlans` 同一个先例：台账是后端落盘的本地事实（day / accepted /
     // confirmed），带出来零上游请求，不违反「快照零上游」；界面的「已领取」

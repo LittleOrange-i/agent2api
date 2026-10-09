@@ -493,6 +493,8 @@ fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
                 })
                 .collect(),
             notice: item.notice.clone(),
+            // 体字节数原样透传（None = 这一轮没发出去；采集侧的理由见 usage 的字段说明）
+            body_bytes: item.body_bytes,
         })
         .collect()
 }
