@@ -8,9 +8,17 @@
 //! Node 版用 `setInterval(tick, 30s)`：单个 setTimeout 在系统休眠、锁屏、时钟被改
 //! 之后会漂移甚至整段错过，而每 30 秒比一次「当前是否已过今天的触发点」，
 //! 唤醒后自然补上。Rust 侧用等价的 `sleep(30s)` 循环，每个 tick 都从**墙上时钟**
-//! （`chrono::Local::now()`）重新判定，因此与 Node 一样具备自愈能力：
+//! （北京时间，见 `core::beijing`）重新判定，因此与 Node 一样具备自愈能力：
 //! libuv 与 tokio 的定时器都基于单调时钟，机器休眠期间都不推进，
 //! 醒来的第一次 tick 会把错过的时点补上 —— 两者在这点上是同一套语义。
+//!
+//! ── 时区口径：固定 UTC+8，不跟机器时区（issue #138）────────────
+//! 「今天是否已触发」与触发时刻都按**北京时间**算（`core::beijing`）：
+//! 签到的自然日是上游的自然日（北京时间零点重置），网关跑在 NAS / Docker /
+//! 海外 VPS 上时跟机器时区走会让定时整体漂移 —— 美西机器上 00:01 的签到
+//! 实际发生在北京时间 15:01，当天额度可能已被更早的调用用掉，面板的
+//! 「今日已签到」也按错误的日期显示。移植自 Node 版（作者在国内，`Local`
+//! 恰好等于 UTC+8）时没有显式钉住这个前提，这里补上。
 //!
 //! ── 补签（有意的行为，别「顺手优化」）────────────────────────
 //! Node 版 `start()` 的条件是**「今天还没签过」**，并不判「时间点是否已过」：
@@ -32,11 +40,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, FixedOffset, TimeZone};
 use serde_json::{json, Map, Value};
 
 use crate::server::config;
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::beijing;
 use crate::server::core::billing::checkin;
 use crate::server::core::billing::BillingService;
 use crate::server::logging;
@@ -246,17 +255,24 @@ pub fn normalize_time(value: Option<&Value>) -> Result<String, AutoCheckinConfig
     Ok(format!("{hour:02}:{minute:02}"))
 }
 
-/// 本地日期键 YYYY-MM-DD：用于「今天是否已触发」的判定。
-/// Node 用 `getFullYear/getMonth/getDate`（**本地时区**），不能用 UTC ——
-/// UTC+8 的凌晨 00:01 在 UTC 下还是前一天，会让补签判重算错一整天。
-pub fn local_date_key(now: DateTime<Local>) -> String {
-    now.format("%Y-%m-%d").to_string()
+/// 北京日期键 YYYY-MM-DD：用于「今天是否已触发」的判定。
+///
+/// 为什么不能用 UTC 算：UTC+8 的凌晨 00:01 在 UTC 下还是前一天，会让
+/// 「今天签过没有」的判重错一整天（移植来源 Node 版用本地时区，作者在
+/// 国内恰好等于 UTC+8 —— 这里显式钉住北京时间，见 `core::beijing`）。
+pub fn date_key(now: DateTime<FixedOffset>) -> String {
+    beijing::date_key(now)
 }
 
-/// 今天的触发时刻（本地时区）；已过则返回 Some，未到返回 None。
+/// 北京时间的今天（`YYYY-MM-DD`）——「今天是否已触发」判定的统一入口。
+pub fn today_key() -> String {
+    beijing::today_key()
+}
+
+/// 今天的触发时刻（北京时间）；已过则返回 Some，未到返回 None。
 /// 对应 Node 版 dueNow：非法的 time 文本在这里同样表现为 None（Node 是抛异常，
 /// 但调用方一律 catch 后 return，结果一致）。
-fn due_now(time_text: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+fn due_now(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
     let target = today_at(time_text, now)?;
     if now >= target {
         Some(target)
@@ -267,7 +283,7 @@ fn due_now(time_text: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
 
 /// 距离下一次触发的毫秒数（用于界面显示「下次执行」）。
 /// 对应 Node 版 msUntilNext：目标时刻已过则顺延到明天同一时刻。
-pub fn ms_until_next(time_text: &str, now: DateTime<Local>) -> i64 {
+pub fn ms_until_next(time_text: &str, now: DateTime<FixedOffset>) -> i64 {
     let Some(mut target) = today_at(time_text, now) else {
         return 0;
     };
@@ -277,23 +293,22 @@ pub fn ms_until_next(time_text: &str, now: DateTime<Local>) -> i64 {
     (target - now).num_milliseconds()
 }
 
-/// 今天的 HH:MM 时刻（本地时区）；time 文本非法时 None。
+/// 今天的 HH:MM 时刻（北京时间）；time 文本非法时 None。
 ///
 /// Node 用 `target.setHours(hour, minute, 0, 0)`（就地改到当天）；
 /// chrono 没有 set_* 的就地 API，用 `with_ymd_and_hms` 重建。
-/// 夏令时切换当天若该时刻不存在（LocalResult::None），按 None 处理 ——
-/// 跳过这一次而不是猜一个偏移，比 Node 的 setHours 更保守（中国无夏令时，
-/// 这条分支实际不会走到）。
-fn today_at(time_text: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+/// 固定偏移没有夏令时问题（构造恒为 `Single`），因此不需要 Node 那种
+/// 「DST 当天该时刻不存在」的兜底 —— `single()` 取不到就当 None，
+/// 也就是这台机器上的时钟环境异常到连北京时间的固定偏移都构造不出来。
+fn today_at(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
     let normalized = normalize_time(Some(&Value::String(time_text.to_string()))).ok()?;
     let (hour, minute) = normalized.split_once(':')?;
     let hour: u32 = hour.parse().ok()?;
     let minute: u32 = minute.parse().ok()?;
     let naive = now.date_naive().and_hms_opt(hour, minute, 0)?;
-    Local
+    beijing::offset()
         .from_local_datetime(&naive)
-        .earliest()
-        .map(|value| value.with_timezone(&Local))
+        .single()
 }
 
 // ─── 状态读写 ───────────────────────────────────────────────
@@ -423,7 +438,7 @@ impl AutoCheckin {
     /// 对外暴露的状态（对应 Node 版 getState，含界面要显示的「下次执行」）
     pub fn state(&self) -> Value {
         let state = read_state();
-        let now = Local::now();
+        let now = beijing::now();
         let next_run_at = if state.enabled {
             let next = logging::now_ms() + ms_until_next(&state.time, now);
             Value::from(next)
@@ -439,7 +454,7 @@ impl AutoCheckin {
                 json!({ "id": id, "label": provider_label(id) })
             }).collect::<Vec<_>>(),
             "lastFiredDate": state.last_fired_date,
-            "lastFiredToday": state.last_fired_date.as_deref() == Some(local_date_key(now).as_str()),
+            "lastFiredToday": state.last_fired_date.as_deref() == Some(date_key(now).as_str()),
             "nextRunAt": next_run_at,
             "lastResult": state.last_result,
             "running": self.is_running(),
@@ -465,7 +480,7 @@ impl AutoCheckin {
             RunningGuard { inner: self.inner.clone() }
         };
 
-        let today = local_date_key(Local::now());
+        let today = today_key();
         // 先落日期再执行：即便签到中途进程被杀，也不会在重启后反复补签
         write_state(json!({ "lastFiredDate": today }));
         logging::log("[Checkin]", &format!("⏰ 定时签到开始（{reason}）"));
@@ -615,12 +630,12 @@ impl AutoCheckin {
         if !state.enabled {
             return;
         }
-        let now = Local::now();
+        let now = beijing::now();
         // 未到点（含 time 非法）直接返回
         if due_now(&state.time, now).is_none() {
             return;
         }
-        if state.last_fired_date.as_deref() == Some(local_date_key(now).as_str()) {
+        if state.last_fired_date.as_deref() == Some(date_key(now).as_str()) {
             return;
         }
         match self.fire("到点触发").await {
@@ -680,7 +695,7 @@ impl AutoCheckin {
             return;
         }
         self.schedule();
-        if state.last_fired_date.as_deref() != Some(local_date_key(Local::now()).as_str()) {
+        if state.last_fired_date.as_deref() != Some(today_key().as_str()) {
             let service = self.clone();
             crate::spawn_task(async move {
                 service.fire("启动补签").await;

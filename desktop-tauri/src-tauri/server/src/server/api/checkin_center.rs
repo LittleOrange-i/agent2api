@@ -47,27 +47,24 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::response::Response;
-use chrono::DateTime;
 use serde_json::{json, Value};
 
 use crate::server::core::auto_checkin::{self, CHECKIN_PROVIDERS};
+use crate::server::core::beijing;
 use crate::server::core::billing::checkin;
 use crate::server::core::checkin_history;
 use crate::server::http::ok_json;
 use crate::server::ServerState;
 
-/// `checkedInToday` 的判定：`checkinAt`（ms）落在今天（本地时区）。
+/// `checkedInToday` 的判定：`checkinAt`（ms）落在今天（**北京时间**，
+/// 上游自然日口径 —— 见 `core::beijing`；跟机器时区走会让海外部署下
+/// 的「今日已签到」错位，issue #138）。
 /// 时间戳缺失 / 非法都算「今天没签」—— 与账号页「checkinAt 落在今天即算签过」
 /// 的口径一致（见 store_admin::mark_checkin 的说明）。
 fn checked_in_today(checkin_at: Option<i64>) -> bool {
-    let Some(ms) = checkin_at else {
-        return false;
-    };
-    let Some(at) = DateTime::from_timestamp_millis(ms) else {
-        return false;
-    };
-    auto_checkin::local_date_key(at.with_timezone(&chrono::Local))
-        == auto_checkin::local_date_key(chrono::Local::now())
+    checkin_at
+        .and_then(beijing::date_key_of_ms)
+        .is_some_and(|key| key == beijing::today_key())
 }
 
 /// 账号快照里的字段（缺失按空值兜底，与 billing::checkin 的读取口径一致）

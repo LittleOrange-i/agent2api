@@ -56,6 +56,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod auth_http;
 pub mod auto_checkin;
+pub mod beijing;
 pub mod billing;
 pub mod capability;
 pub mod checkin_history;
