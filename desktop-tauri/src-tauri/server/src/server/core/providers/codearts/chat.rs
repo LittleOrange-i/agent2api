@@ -100,6 +100,9 @@ impl HeaderProfile {
 ///   （不是客户端看到的名字，映射在目录层做）
 /// * `benefit` 为真时注入 `maas_type: benefit`（福利模型才需要，普通模型带了
 ///   反而会被判成"没领福利"）
+/// * 出站前把 `max_tokens` / `max_completion_tokens` 超过上游硬顶的取值钳到
+///   65536（[`clamp_output_tokens`]）—— 上游对超顶取值**整条**拒收
+///   （`InferHub.001001005.400`），不钳就等于每次对话全账号 502
 /// * 返回 `(完整地址, 已签名的头, 请求体)`；`credential` 允许为空 —— 空的时候
 ///   不签名（调试逃生口，与参考实现一致）
 pub fn build_upstream_request(
@@ -128,6 +131,9 @@ pub fn build_upstream_request(
         // 让上游在最后一帧带上 usage（不要求它就永远不会给）
         object.insert("stream_options".to_string(), json!({ "include_usage": true }));
     }
+    // 输出上限钳制（实测依据见 `clamp_output_tokens`）：放在序列化前的最后一步，
+    // 此后没有任何一步会再动 body。
+    clamp_output_tokens(&mut payload);
     let body = serde_json::to_vec(&payload)
         .map_err(|error| GatewayError::with_status(400, format!("请求体序列化失败：{error}")))?;
     let mut headers = profile.headers(model);
@@ -141,6 +147,64 @@ pub fn build_upstream_request(
     let signed = signer::sign("POST", &endpoint, &headers, &body, &signer_credential(credential), false)
         .map_err(|reason| GatewayError::with_status(500, reason))?;
     Ok((endpoint, signed, body))
+}
+
+/// 上游对**输出上限**（`max_tokens` / `max_completion_tokens` 的取值）的硬顶，
+/// 单位是 Token 个数。实测值，不是推测值 —— 依据见 [`clamp_output_tokens`]。
+pub const MAX_OUTPUT_TOKENS: i64 = 65_536;
+
+/// 出站请求体 `max_tokens` / `max_completion_tokens` 的**上限归一**（就地修改）。
+///
+/// ── 上游行为（2026-10-09 本机实测，逐格结论）──────────────────
+/// 这两个键的**取值**参与上游预校验：**65536 放行、65537 起一律拒收**，整条
+/// 请求回 `InferHub.001001005.400：The request param is invalid`（不是截断、
+/// 也不是部分失败；两个键各自都受这道校验）。边界两侧都逐点打过：65536 过，
+/// 65537 / 73728 / 81920 / 98304 / 100000 / 122880 / 128000 / 131071 / 131072 全拒。
+/// 三条"不是它"（都已排除，别再把排查引回去）：**与提示词长度无关**（2 万字符
+/// 的真实请求体 + 65536 → 200）、**与模型无关**（福利 `glm-5.3-flash` 与非福利
+/// `glm-5.2-sft-harmony` 边界一致，是平台级校验）、**与其它参数无关**（35 个
+/// `tools` + `tool_choice` / `thinking` / `enable_thinking` / `reasoning` /
+/// `reasoning_effort` / `prompt_cache_key` 单独加都是 200）。
+///
+/// ── 目录里的 maxOutputTokens 不是依据 ───────────────────────
+/// 上游目录给 `glm-5.3-flash` 声明 `maxOutputTokens: 131072`（`deepseek-v4-*`
+/// 甚至声明 393216），**与实际执行的 65536 不符** —— 照声明钳等于没钳，
+/// 128000 照样被拒。
+///
+/// ── 为什么必须修：不钳 = 每次对话整条 502 ────────────────────
+/// ZCode 这类客户端按自己的上下文长度发 `max_completion_tokens: 128000`，原样
+/// 透传时表现为「CodeArts 账号逐个 502、换号也没用」，而模型测试路径不带这个
+/// 字段、一路 200 —— 两边现象对不上，极易把排查带向账号 / 网络 / 思考等级
+/// （实测：真实请求体**只去掉**这一个字段 → 200，加回 128000 → 502）。
+///
+/// ── 归一规则（只在「超过硬顶」窗口里动手）────────────────────
+///   - 字段存在、是整数（`as_i64`）且 > [`MAX_OUTPUT_TOKENS`] → 改写为
+///     `MAX_OUTPUT_TOKENS`。**钳而不是删**：删等于让上游按默认档回答（通常
+///     几千），客户端"要长回答"的意图直接丢失；钳到硬顶是上游能给的最大值；
+///   - **缺省时不注入**、非整数形态（字符串 / null / 浮点）不碰：其余形态交
+///     上游自己报错，不在网关里猜语义；
+///   - 两个键各判各的，只改客户端**用了的那个键**，不替它新造键；
+///   - 本函数**不打日志**：客户端每个请求都带这个值，钳一次写一行会把日志刷满
+///     （与 autoclaw 的 `normalize_max_tokens` 同一取舍）。
+///
+/// ── 判据纪律：写在本适配器里 = 按 provider 生效，别改按模型名 ──
+/// 与 [`reserve_for_thinking`] 同一条：别家上游没有这道预校验（小浣熊那边
+/// `max_completion_tokens` 原样可用），因此判据只住本文件、只被
+/// [`build_upstream_request`] 调用，天然只对 CodeArts 出站生效。
+fn clamp_output_tokens(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in ["max_tokens", "max_completion_tokens"] {
+        let over = matches!(object.get(key), Some(Value::Number(n))
+            if n.as_i64().is_some_and(|value| value > MAX_OUTPUT_TOKENS));
+        if over {
+            object.insert(
+                key.to_string(),
+                Value::Number(serde_json::Number::from(MAX_OUTPUT_TOKENS)),
+            );
+        }
+    }
 }
 
 /// 折叠出来的非流式回答。
