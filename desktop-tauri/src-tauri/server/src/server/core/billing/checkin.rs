@@ -436,6 +436,28 @@ fn checkin_completed_today(claim: &Value) -> bool {
     message.contains("已签到") || message.contains("已领取")
 }
 
+/// 这条领取结果是「中性未领取」—— 不是成功、不是已签、也不是失败，而是
+/// 「此刻没有可领的活动」。Qoder 国际版的活动窗口每天 10:00（UTC+8）才开，
+/// 定时签到在这个窗口之前跑完时结果必然长这样；自动签到调度据此判断
+/// 「今天要不要保持未落账、过段时间重试」（见 `auto_checkin::tick`）。
+///
+/// 判据刻意与 [`checkin_completed_today`] 相反且**只认中性文案**：把失败
+/// （网络错误 / 凭证失效）也当成 pending 会让坏账号整天反复重试打上游。
+pub fn claim_pending(claim: &Value) -> bool {
+    if checkin_completed_today(claim) {
+        return false;
+    }
+    // error 字段非空 = 执行出错（网络 / 凭证），那不是「等窗口」能解决的
+    if claim.get("error").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty()) {
+        return false;
+    }
+    let message = claim.get("msg").and_then(Value::as_str).unwrap_or("");
+    // 两个地区的「无活动」文案都含这一句；实现改措辞时这里要跟着对齐
+    //（`providers::qoder::checkin::no_claim` 与 trae 的「未领取 + 原因」不同形，
+    // trae 不走这条 pending 逻辑 —— 它没有窗口概念）。
+    message.contains("没有可领取的签到活动") || message.contains("未下发每日积分活动")
+}
+
 /// 执行一次签到并汇总（Node 版 `runCheckin(id)`）。
 ///
 /// `id` 为 None 时签全部符合条件的账号（定时签到走这条），范围由 `providers`

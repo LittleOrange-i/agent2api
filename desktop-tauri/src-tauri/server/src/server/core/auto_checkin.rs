@@ -128,6 +128,12 @@ pub fn provider_label(id: &str) -> &str {
 /// 归一化配置里的提供商清单：只认 CHECKIN_PROVIDERS 里的 id（去重、保持顺序），
 /// 缺失 / 空数组 / 全是非法值都回落到「全选」—— 旧配置文件里没有这个字段，
 /// 读出来必须是合法的默认行为。
+///
+/// 存量兼容：Qoder 拆家（2026-10）前的老清单只有 9 项、没有 `qoder-intl`，
+/// 而显式清单不会被「缺啥补啥」—— 不补的话，拆家前勾了 Qoder 的用户拆家后
+/// 自动签到会静默漏掉国际版账号。这里按账号迁移的同一口径补齐：勾了
+/// `qoder` 的，紧跟其后补上 `qoder-intl`（要签中国版就要签国际版，拆家只是
+/// 同一套能力的地区分身）；两者都没勾的（明确不签 Qoder）不动。
 pub fn normalize_providers(value: Option<&Value>) -> Vec<String> {
     let Some(list) = value.and_then(Value::as_array) else {
         return default_providers();
@@ -140,11 +146,17 @@ pub fn normalize_providers(value: Option<&Value>) -> Vec<String> {
         })
         .map(|id| id.to_string())
         .collect();
-    if picked.is_empty() {
+    let mut picked = if picked.is_empty() {
         default_providers()
     } else {
         picked
+    };
+    if let Some(pos) = picked.iter().position(|id| id == "qoder") {
+        if !picked.contains(&"qoder-intl".to_string()) {
+            picked.insert(pos + 1, "qoder-intl".to_string());
+        }
     }
+    picked
 }
 
 /// config.json 里承载定时签到状态的键
@@ -491,6 +503,25 @@ impl AutoCheckin {
         outcome
     }
 
+    /// 本轮是否有「Qoder 国际版账号没领到且不算已签」的行 —— 有则今天保持
+    /// 未落账状态，等窗口开了重试（见 tick 的说明）。
+    fn qoder_intl_pending(result: &Value) -> bool {
+        result
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items.iter().any(|item| {
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("qoder-global-"))
+                        && crate::server::core::billing::checkin::claim_pending(
+                            &item.get("claim").cloned().unwrap_or(Value::Null),
+                        )
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// 成功分支：汇总 + 记录 lastResult + 日志（对应 Node fire 里的 try 主体）
     fn record_success(&self, result: &Value, today: &str, reason: &str) -> Value {
         let number = |key: &str| {
@@ -553,12 +584,32 @@ impl AutoCheckin {
                 },
             ),
         );
+        // qoderIntlPending 不进 lastResult（那是给界面看的快照），单独放在
+        // fire 的返回值上供 tick 决定今天要不要保持未落账
+        let mut summary = summary;
+        if let Some(object) = summary.as_object_mut() {
+            object.insert(
+                "qoderIntlPending".to_string(),
+                Value::Bool(Self::qoder_intl_pending(result)),
+            );
+        }
         summary
     }
 
     // ─── 调度 ───────────────────────────────────────────────
 
-    /// 轮询回调：到点且今天没签过就执行（对应 Node 版 tick）
+    /// 轮询回调：到点且今天没签过就执行（对应 Node 版 tick）。
+    ///
+    /// ── Qoder 国际版的窗口补领（2026-10，issue #140）────────────
+    /// 国际版「每日 100 Credits」的官方窗口**每天 10:00（UTC+8）开启**，而
+    /// 缺省触发时刻是 00:01 —— 那时窗口还没开，活动列表里没有积分活动，
+    /// 领取轮次对它只能得到「无活动」。若就此落 `lastFiredDate` 整天不再
+    /// 重试，国际版账号等于永远领不到。所以主轮次**照常在配置时刻跑**，
+    /// 但当轮次里存在「Qoder 国际版无活动未落账」的行时，今天暂不落
+    /// `lastFiredDate`：之后每个 tick 会重新进来，直到 10:00 窗口开启领到
+    /// （或活动行出现 CLAIMED）才落账 —— 与 10router「no-activity 刻意不
+    /// 记忆、下个 tick 再看」同一语义。`fire` 返回该信息，None（在跑/出错）
+    /// 与普通完成照旧落账。
     pub async fn tick(&self) {
         let state = read_state();
         if !state.enabled {
@@ -572,7 +623,21 @@ impl AutoCheckin {
         if state.last_fired_date.as_deref() == Some(local_date_key(now).as_str()) {
             return;
         }
-        self.fire("到点触发").await;
+        match self.fire("到点触发").await {
+            Some(result) => {
+                // 领取轮次完成，但里面有「Qoder 国际版无活动」的行 → 不落账，
+                // 今天窗口开了之后由后续 tick 重试
+                if result.get("qoderIntlPending").and_then(Value::as_bool) == Some(true) {
+                    write_state(json!({ "lastFiredDate": Value::Null }));
+                    logging::log(
+                        "[Checkin]",
+                        "⏳ Qoder 国际版的活动窗口未开（官方每日 10:00 UTC+8），今天会自动重试到领到为止",
+                    );
+                }
+            }
+            // None = 已有轮次在跑或执行出错：照旧落账（fire 内部已写），行为不变
+            None => {}
+        }
     }
 
     /// 起调度循环（对应 Node 版 schedule 的 `if (timer) return`）：

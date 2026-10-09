@@ -307,7 +307,10 @@ fn no_claim(region: Region, claimed: bool, risk_note: Option<String>) -> Value {
     }
     if region == Region::Global {
         // 国际版：要么缺 UMID 组件（风控头没带上，上游不下发积分活动），
-        // 要么组件在但今天没得领。两句话说清，用户才知道下一步该做什么。
+        // 要么组件在但活动列表里此刻没有积分活动。10router 作者也在国际版
+        // 上观察到「长期只回 VIEW_DETAILS 促销」（见它的 qoderCheckin.js），
+        // 官方文档确认每日 100 Credits 的窗口每天 10:00（UTC+8）开启 ——
+        // 文案如实说明现状与时机，不要暗示「已经领过」。
         if let Some(note) = risk_note {
             return json!({
                 "success": false,
@@ -316,7 +319,7 @@ fn no_claim(region: Region, claimed: bool, risk_note: Option<String>) -> Value {
         }
         return json!({
             "success": false,
-            "msg": "当前没有可领取的签到活动（国际版每台设备每天限领一次）",
+            "msg": "上游暂未给该账号下发每日积分活动（官方活动窗口每天 10:00 开启，若今天已在 Qoder 客户端领过则活动行会消失）。明天 10 点后再试",
         });
     }
     // 中国版没有活动是账号侧状态（实测 Free 套餐账号如此，Pro/试用账号才有），
