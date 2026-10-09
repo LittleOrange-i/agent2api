@@ -126,6 +126,14 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // —— 下次点「升级」会重复导入一遍历史明细。
     "requestsMigrated",
     "dailyMigrated",
+    // 模型用量口径订正的完成标记（request_stats::aggregate 的
+    // `MODEL_UPSTREAM_MARKER`）—— #139 的根因就是这个键漏登记：
+    // 它在 `remap_model_days` 里**直接写库**（与重算同一事务，有意的：
+    // 中断后标记必然没写、下次整批重跑），而 `config::init` 把全库读进内存
+    // 快照发生在那之前 —— 不登记的话，用户改任意一项配置时 `save_raw` 会把
+    // 它当「配置里已删掉的键」清掉，下次启动同一批历史被重算第二遍
+    // （日期键未变时是幂等覆盖、静默；变过日期键就留下重复的聚合行）。
+    "modelUsageUpstreamRemapped",
     // 远程模型清单的持久化缓存（core::providers::catalog_cache）：整份
     // 「各家上次成功拉到的清单」一个键（十份清单挤一个键的理由见那个模块头）。
     // 属于「其它零散状态」——它不是配置项，配置写入绝不能动它。
