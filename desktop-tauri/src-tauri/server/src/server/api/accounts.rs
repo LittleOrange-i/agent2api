@@ -445,9 +445,16 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 Err(reason) => Err(AccountStoreError::new(reason, 400)),
             }
         }
-        Some(crate::server::core::providers::ProviderKind::Qoder) => {
-            match crate::server::core::providers::qoder::auth::prepare_account(&payload).await {
-                Ok(credentials) => store.add_qoder_account(&credentials, import_name, "manual"),
+        // Qoder（两个地区走同一份实现、按地区参数化，与 AutoClaw 同款）：
+        // 粘贴 PAT / 凭证 → 手动添加。拆家后界面上是两张卡片（`qoder` /
+        // `qoder-intl`），地区由 kind 反查（provider 身份是权威，payload 里
+        // 的 `mode` 只是兼容字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Qoder
+            | crate::server::core::providers::ProviderKind::QoderIntl)) => {
+            let region = crate::server::core::providers::qoder::endpoints::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::qoder::endpoints::Region::Cn);
+            match crate::server::core::providers::qoder::auth::prepare_account(&payload, region).await {
+                Ok(credentials) => store.add_qoder_account(region, &credentials, import_name, "manual"),
                 Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
             }
         }
@@ -849,8 +856,16 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
             "自定义提供商账号的凭证由用户直接提供，无需刷新（更换凭证请重新添加或直接编辑）",
         );
     }
-    if state.store().qoder_account_record(&id).is_some() {
-        return refresh_provider_account(state, &id, ProviderKind::Qoder).await;
+    // Qoder（两个地区各查一次 —— 账号集合按 provider 隔离，同一 id 不可能
+    // 同时属于两家，与 Accio / AutoClaw 同一条遍历）
+    for region in crate::server::core::providers::qoder::endpoints::Region::ALL {
+        if state
+            .store()
+            .qoder_account_record(region, &id)
+            .is_some()
+        {
+            return refresh_provider_account(state, &id, region.kind()).await;
+        }
     }
     // CodeArts：一次性 refresh token + 写回，必须走适配器。
     // **这条不能省**：漏了就会落到下面的 workbuddy 兜底链路，用户得到一条与

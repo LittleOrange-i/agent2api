@@ -64,10 +64,10 @@ impl std::fmt::Display for CheckinError {
 /// 国际版没有签到活动，签到相关操作一律排除该版本账号
 /// （Node: `account.edition !== 'intl'`）。
 ///
-/// **Qoder 也吃这条判据**：它的公开账号形态带 `edition`（`account_store` 把
-/// `Region::edition()` 写进公开字段，global → `intl`），而签到活动只有中国版有
-/// （国际版的 legacy 签到路径 404、活动列表里只有促销），于是「非 intl」这一条
-/// 刚好把国际版 Qoder 排除、放行中国版 —— 不需要为它再加一条 provider 特判。
+/// **Qoder 国际版已不再吃这条判据**（2026-10，issue #140）：国际版有独立的
+/// 签到链路（带设备风控身份领「每日 100 Credits」，见 `providers::qoder::checkin`
+/// 与 `qoder::risk`），在下面的 provider 判定里显式放行 —— 与 WorkBuddy
+/// 国际版同一手法。拆家后两家 provider id 各自独立，放行判据按 id 写。
 ///
 /// Accio 系（两个地区）**整家**也没有签到活动：上游客户端全包检索不到
 /// 「签到 / checkin / 每日任务」的任何痕迹（见 `providers::accio` 的模块头）。
@@ -87,6 +87,12 @@ pub fn supports_checkin(account: &Value) -> bool {
     // 它的 provider id 是拆家后的独立 id，不与国内版共用 —— 放行必须写在
     // 下面的 edition 判定之前，否则会被「intl 一刀切」挡掉。
     if provider == crate::server::core::providers::workbuddy::Region::Intl.provider_id() {
+        return true;
+    }
+    // Qoder 国际版同理（2026-10 拆家 + issue #140）：它有自己的签到链路
+    // （带设备风控身份领「每日 100 Credits」，见 `providers::qoder::checkin`
+    // 与 `qoder::risk`），放行同样必须写在 edition 判定之前。
+    if provider == crate::server::core::providers::qoder::endpoints::Region::Global.provider_id() {
         return true;
     }
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
@@ -202,7 +208,8 @@ pub fn resolve_checkin_targets(
 ///   - **小浣熊**：桌面登录积分链路（`providers::raccoon::balance::claim_daily_grant`）；
 ///   - **AutoClaw**：通用任务接口的 `daily_signin` 任务
 ///     （`providers::autoclaw::checkin::claim_daily_signin`）；
-///   - **Qoder**：活动（campaign）领取链路，只有中国版有
+///   - **Qoder**：活动（campaign）领取链路，中国版直领；国际版要先带设备
+///     风控身份重新拉活动列表（`providers::qoder::checkin` + `qoder::risk`）；
 ///     （`providers::qoder::checkin::claim_daily_checkin`）；
 ///   - **Trae**：SOLO 的 `checkin_credits` 领取（`providers::trae::checkin`）。
 ///
@@ -242,12 +249,17 @@ pub async fn checkin_for(
             .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)
         }
-        "qoder" => {
-            // 中国版的每日权益以活动（campaign）形式下发；国际版没有签到计划，
-            // 它由 `supports_checkin` 挡在入口（Qoder 公开形态带 edition），
-            // 实现里的国际版文案只是兜底。
+        "qoder" | "qoder-intl" => {
+            // Qoder 的每日权益以活动（campaign）形式下发，两个地区走同一条
+            // 实现按地区分支：中国版直接领；国际版要先带设备风控身份重新拉
+            // 活动列表（见 `qoder::checkin` 的模块头）。地区由 provider id
+            // 反查（拆家后它就是身份），与 AutoClaw 两个地区的分派同款。
+            let region = crate::server::core::providers::qoder::endpoints::Region::from_provider_id(
+                provider_id,
+            )
+            .unwrap_or(crate::server::core::providers::qoder::endpoints::Region::Cn);
             let claim =
-                crate::server::core::providers::qoder::checkin::claim_daily_checkin(store, &id)
+                crate::server::core::providers::qoder::checkin::claim_daily_checkin(store, region, &id)
                     .await
                     .map_err(|error| error.message);
             claim_result(id, name, &display, true, claim)

@@ -44,10 +44,58 @@ const PROVIDER_DESC: Record<string, string> = {
   raccoon: '桌面端每日积分链路',
   autoclaw: '官方客户端的每日签到任务',
   'autoclaw-intl': '与国内版同一套任务接口 · 站点不同',
-  qoder: '活动（campaign）领取 · 每天 10:00 刷新 · 仅中国版',
+  qoder: '活动（campaign）领取 · 每天 10:00 刷新',
+  'qoder-intl': '带设备风控身份领取「每日 100 Credits」 · 需要 UMID 组件',
   trae: 'SOLO 的 checkin_credits 领取 · 按自然日 0 点刷新',
   loomy: '无独立签到接口 · 每天替账号打一次首次登录积分',
   kuku: '「免费领积分」的每日任务 · 逐个领取',
+}
+
+/**
+ * Qoder 国际版的 UMID 组件提示（展开后的分组详情顶部）。
+ *
+ * 国际版签到依赖本机的设备风控身份（`Cosy-MachineToken` 三件套），组件来源
+ * 三种：本机 Qoder 客户端、qodercli 解压、网关数据目录安装（Linux 一键装）。
+ * 这里只读一次状态：装了就说明来源，没装且平台支持安装就给按钮（Linux/Docker
+ * 用户唯一能自助的路径）；不支持安装的平台只说明怎么补 —— Windows/macOS 装
+ * 客户端或 qodercli 后无需重启网关（组件发现按次执行）。
+ */
+function UmidHint(): React.ReactElement | null {
+  const [state, setState] = React.useState<{ available?: boolean; source?: string | null; installSupported?: boolean; installing?: boolean } | null>(null)
+  const load = React.useCallback(async (): Promise<void> => {
+    try {
+      const response = await fetch('/api/qoder-umid')
+      if (response.ok) setState(await response.json())
+    } catch { /* 状态是锦上添花，拉不到不挡签到 */ }
+  }, [])
+  React.useEffect(() => { void load() }, [load])
+  if (!state || state.available) return null
+  const install = async (): Promise<void> => {
+    try {
+      setState(prev => prev ? { ...prev, installing: true } : prev)
+      const response = await fetch('/api/qoder-umid/install', { method: 'POST' })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        shared().wbApp?.toast?.(`UMID 组件安装失败：${payload?.error ?? response.status}`, 'err')
+      } else {
+        shared().wbApp?.toast?.('✅ UMID 组件已安装，下轮签到即可领取国际版积分')
+      }
+    } catch (error) {
+      shared().wbApp?.toast?.(`UMID 组件安装失败：${error instanceof Error ? error.message : String(error)}`, 'err')
+    } finally {
+      void load()
+    }
+  }
+  return (
+    <div className='flex flex-wrap items-center gap-2 px-[2px] pb-1 text-[12px] text-muted-foreground'>
+      <span>国际版签到需要 UMID 组件生成设备风控身份（本机未检测到）。</span>
+      {state.installSupported
+        ? <Button variant='outline' size='sm' disabled={state.installing === true} onClick={() => { void install() }}>
+            {state.installing ? '安装中…' : '一键安装组件'}
+          </Button>
+        : <span>安装 Qoder 客户端或 qodercli 后即可（无需重启网关）。</span>}
+    </div>
+  )
 }
 
 /** 问号提示全文（沿用 tasks-panel 的 CHECKIN_DESC，签到口径没变） */
@@ -56,6 +104,8 @@ const AUTO_CHECKIN_DESC =
   '国际版走每日活跃任务：探测活动、领日活奖励、再用免费模型保活；' +
   '小浣熊走桌面端每日积分链路；AutoClaw 走官方客户端的每日签到任务；' +
   'Qoder 中国版走活动领取，没被下发活动的账号会得到中性提示；' +
+  'Qoder 国际版要先带设备风控身份（本机 Qoder 客户端 / qodercli 的 UMID 组件生成）' +
+  '才能看到「每日 100 Credits」活动，缺组件时会得到明确的说明而不是报错；' +
   'Trae 领 SOLO 的每日签到积分（按自然日 0 点重置），上游没对该账号开活动、' +
   '或凭据里没有设备号时得到的是「未领取 + 具体原因」而不是报错；' +
   'Loomy 每天替账号打一次首次登录积分；KukuAI 领「免费领积分」的每日任务）。' +
@@ -207,6 +257,7 @@ function ProviderRow({ group, expanded }: { group: CheckinProviderGroup; expande
       </div>
       {expanded ? (
         <div className='ck-prov-detail'>
+          {group.id === 'qoder-intl' ? <UmidHint /> : null}
           <AccountRows group={group} />
         </div>
       ) : null}

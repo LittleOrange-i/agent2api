@@ -166,7 +166,7 @@ const PROVIDER_HUES: Record<string, number> = {
   workbuddy: 250, 'workbuddy-intl': 295,
   raccoon: 60, catpaw: 85,
   autoclaw: 250, 'autoclaw-intl': 295,
-  qoder: 330, 'cline-free': 200, 'cline-pass': 200,
+  qoder: 330, 'qoder-intl': 350, 'cline-free': 200, 'cline-pass': 200,
   codearts: 210, loomy: 155, kuku: 15,
   accio: 320, 'accio-intl': 335, trae: 170, zcode: 285,
 }

@@ -247,7 +247,9 @@ impl AccountStore {
             // 账号字段、桌面端判定、deviceId 语义两地完全一致，
             // 差别只在域名（那是转发与凭证层的事，公开形态不体现）
             self.to_autoclaw_public_account(record)
-        } else if record.provider() == super::QODER_PROVIDER_ID {
+        } else if super::is_qoder_family(&record.provider()) {
+            // 两个地区（`qoder` / `qoder-intl`）共用这一份公开形态：地区由
+            // provider id（兜底 `mode` 字段）派生进 `edition` / `editionLabel`
             self.to_qoder_public_account(record)
         } else if record.provider() == super::codearts_accounts::CODEARTS_PROVIDER_ID {
             self.to_codearts_public_account(record)

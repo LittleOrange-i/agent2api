@@ -195,13 +195,10 @@ fn proxies_summary() -> Value {
 ///   - 注册表里没有的 id → 400「未知的提供商」（不静默回落 workbuddy：
 ///     那会把一次小浣熊登录发起成 workbuddy 登录）。
 pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Response {
-    // edition 解析失败不是错误（Node 版 `catch { edition = null }`）
+    // 请求里的 `edition` 不再参与地区判定：拆家后界面上两张卡片各发各的
+    // provider id，那是权威（`edition` 只是前端回显字段，见下面 Qoder /
+    // ZCode 两个分支的说明）。解析失败不是错误（Node 版 `catch { edition = null }`）。
     let payload = parse_body(&body).ok();
-    let edition = payload
-        .as_ref()
-        .and_then(|payload| payload.get("edition").and_then(Value::as_str))
-        .map(str::to_string)
-        .filter(|value| !value.is_empty());
     let provider = payload
         .as_ref()
         .and_then(|payload| payload.get("provider").and_then(Value::as_str))
@@ -215,14 +212,20 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
             None => return management_error(400, format!("未知的提供商：{other}")),
         },
     };
-    if kind == crate::server::core::providers::ProviderKind::Qoder {
-        let handle = match state.login().start_qoder_login(edition.as_deref()) {
+    // Qoder：设备授权，两站同构。拆家后界面上是两张卡片（`qoder` /
+    // `qoder-intl`），点哪张就发哪个 provider id —— 地区由 **provider id**
+    // 反查（与下面 ZCode 同一条理由：`edition` 是前端回显字段，拿它定地区
+    // 会让两张卡片共用一个表单时串味）。
+    if let Some(region) =
+        crate::server::core::providers::qoder::endpoints::Region::from_kind(kind)
+    {
+        let handle = match state.login().start_qoder_login(region) {
             Ok(handle) => handle,
             Err(error) => return management_error(400, error),
         };
         let task = handle.snapshot();
         return ok_json(json!({ "state": task.state, "authUrl": task.auth_url,
-            "edition": task.edition, "provider": "qoder" }));
+            "edition": task.edition, "provider": region.provider_id() }));
     }
     // ZCode：**服务端中介的 CLI 轮询**（`/oauth/cli/init` 拿授权地址，
     // 用户在浏览器里授权后由后台任务轮询换令牌）。响应形状与 Qoder 那条

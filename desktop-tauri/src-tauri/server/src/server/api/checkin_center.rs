@@ -82,10 +82,12 @@ fn account_text(account: &Value, key: &str) -> String {
 /// outOfScope 的原因文案（按 `supports_checkin` 的排除分支逐一对应）：
 /// 判据改了这里要跟着改 —— 两处写的都是「这个账号为什么不能签到」。
 fn out_of_scope_reason(account: &Value) -> &'static str {
+    let provider = account_text(account, "provider");
+    // WorkBuddy / Qoder 两个地区的国际版都在 `supports_checkin` 里显式放行
+    //（前者走日活链、后者带风控领积分），还落在范围外的 intl 只可能是 Accio。
     if account.get("edition").and_then(Value::as_str) == Some("intl") {
         return "国际版账号没有签到活动";
     }
-    let provider = account_text(account, "provider");
     if crate::server::core::account_store::is_accio_family(&provider) {
         return "未接入签到链路";
     }

@@ -441,11 +441,16 @@ impl AccountStore {
         // 排在 Cline 之后只是让「拆家类迁移」聚在一起。
         let workbuddy_moved = Self::migrate_workbuddy_intl_accounts(&mut state);
 
+        // ⑥ Qoder 国际版拆家（见 `migrate_qoder_intl_accounts`）：与 ⑤ 同款，
+        // 只改 `provider`、不改 id（Qoder 的 id 本来就带地区段）。
+        let qoder_moved = Self::migrate_qoder_intl_accounts(&mut state);
+
         if provider_added == 0
             && assignments.is_empty()
             && !scope_migrated
             && cline_renamed == 0
             && workbuddy_moved == 0
+            && qoder_moved == 0
         {
             return json!({
                 "providerAdded": 0,
@@ -479,6 +484,15 @@ impl AccountStore {
                 "[Accounts]",
                 &format!(
                     "🔀 WorkBuddy 已拆为国内版 / 国际版两家，{workbuddy_moved} 个国际版账号已归位\
+                     （凭证、优先级、限流记录与账号 id 均未改动）"
+                ),
+            );
+        }
+        if qoder_moved > 0 {
+            logging::log(
+                "[Accounts]",
+                &format!(
+                    "🔀 Qoder 已拆为中国版 / 国际版两家，{qoder_moved} 个国际版账号已归位\
                      （凭证、优先级、限流记录与账号 id 均未改动）"
                 ),
             );
@@ -605,6 +619,46 @@ impl AccountStore {
                 continue;
             }
             record.set_provider(provider);
+            moved += 1;
+        }
+        moved
+    }
+
+    /// Qoder 国际版拆家：把 `provider == "qoder"` 且地区为国际版的记录归到
+    /// `qoder-intl`（2026-10，见 `providers::qoder::endpoints` 的模块头）。
+    ///
+    /// ── 判据：记录里的地区，而不是 id 前缀 ─────────────────────
+    /// 拆家前「这个账号属于哪个地区」由记录的 `mode`（兜底 `edition`）字段
+    /// 表达（`Region::from_payload` 的读取口径）。id 虽然也带地区段
+    /// （`qoder-global-…` / `qoder-cn-…`），但那是生成时的快照，记录的权威
+    /// 表达一直是凭证字段 —— 与 WorkBuddy 拆家「判据是 edition」同一取舍。
+    ///
+    /// ── 为什么不改 id（与 `migrate_cline_accounts` 的差别）────────
+    /// Qoder 的 id 生成时已含地区段，两地区的 id 空间天然不相交（同 WorkBuddy
+    /// 拆家的论证）；而 id 是 `requests.account_id` 与请求报表的引用键，改名
+    /// 会让历史记录对不上账号。
+    ///
+    /// ── 幂等 ────────────────────────────────────────────────────
+    /// 判据是数据本身（`provider == qoder && 地区 == 国际`）：迁完就没有
+    /// 这样的记录，再跑一遍返回 0、不写库。
+    fn migrate_qoder_intl_accounts(state: &mut AccountState) -> usize {
+        /// 拆家前的唯一 Qoder provider id（只出现在这里）
+        const LEGACY_QODER_ID: &str = "qoder";
+        let mut moved = 0usize;
+        for record in state.accounts.iter_mut() {
+            if record.provider() != LEGACY_QODER_ID {
+                continue;
+            }
+            let Some(region) =
+                crate::server::core::providers::qoder::endpoints::Region::from_payload(
+                    &record.to_value(),
+                )
+                .ok()
+                .filter(|region| *region == crate::server::core::providers::qoder::endpoints::Region::Global)
+            else {
+                continue;
+            };
+            record.set_provider(region.provider_id());
             moved += 1;
         }
         moved

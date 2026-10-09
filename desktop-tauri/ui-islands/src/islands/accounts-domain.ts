@@ -102,7 +102,11 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // 那一家就会掉进 GENERIC_FEATURES（症状：余额按钮消失、标识列显示成空）
   autoclaw: { usage: true, edition: false, identifier: 'userId', expiry: 'tokenExpiresAt' },
   'autoclaw-intl': { usage: true, edition: false, identifier: 'userId', expiry: 'tokenExpiresAt', emailAsName: true },
+  // Qoder 两个地区能力完全一致（拆家后是两家 provider，查表按 id 精确匹配，
+  // 只登记一个会让国际版掉进 GENERIC_FEATURES）；`edition` 列仍在 —— 两家各是
+  // 单一地区，但公开形态仍带 edition 供徽章显示
   qoder: { usage: true, edition: true, identifier: 'userId', expiry: 'expiresAt', emailAsName: true },
+  'qoder-intl': { usage: true, edition: true, identifier: 'userId', expiry: 'expiresAt', emailAsName: true },
   // Cline 两条键：同一家上游按计费通道拆成两个 provider，账号形态完全一样（见
   // providers::cline::models）。查表按 id 精确匹配，只登记一个会让另一家掉进兜底
   'cline-free': { usage: true, edition: false, identifier: 'account', expiry: 'expiresAt' },
@@ -290,12 +294,14 @@ export const TOKEN_PERIOD_MAX_SECONDS = 86_400
 /** 旧「余额不足处理」的缺省阈值（限制器上线后只作为旧记录的推导兜底） */
 export const DEFAULT_LOW_BALANCE_THRESHOLD = 1
 
-/** CodeArts 缺省 Token 规则的阈值：**每日** 1000 万 Token（自然日 0 点重置）。 */
-export const DEFAULT_DAILY_TOKEN_LIMIT = 10_000_000
+/** CodeArts 缺省 Token 规则的阈值：**每日** 950 万 Token（自然日 0 点重置）。
+ * 不给满 1000 万：实际消耗停不到精确的额度上限，上游在 995 万左右就会开始
+ * 报余额不足，压着 1000 万判定只会让请求撞报错，950 万是留足余量的判定线。 */
+export const DEFAULT_DAILY_TOKEN_LIMIT = 9_500_000
 
 /**
  * 各 provider 的**缺省限制规则** —— 与后端 `limiter::default_rules` 同一口径：
- * - **CodeArts → Token 自然日 1000 万，跳过**：这家的余额读数常判不出
+ * - **CodeArts → Token 自然日 950 万，跳过**：这家的余额读数常判不出
  *   （免费版账号没有积分类计量表，额度全在福利 token 池），余额规则形同虚设；
  *   「过了 0 点额度就回来」正是它的额度形态，按自然日 Token 判定才兜得住。
  * - **Cline 免费池 → 无规则**（原「不处理」缺省的理由不变）。

@@ -63,10 +63,13 @@ pub const DEFAULT_TIME: &str = "00:01";
 ///     两地是同一套路径、同一套任务 id，只是站点不同（已实测），因此两家
 ///     都列进来；地区由 `billing::checkin` 从账号的 provider 反查。
 ///   - **Qoder 中国版**：活动（campaign）领取链路（`providers::qoder::checkin`）。
-///     只有中国版有每日签到 —— 国际版这个地区没有签到计划（legacy 路径 404、
-///     活动列表里只有促销），由 `billing::checkin::supports_checkin` 按 edition
-///     排除。中国版里 Free 套餐账号也可能没有被下发活动（实测如此），那种情况
-///     实现返回一条中性结果（「当前没有可领取的签到活动」），不算失败。
+///     Free 套餐账号也可能没有被下发活动（实测如此），那种情况实现返回一条
+///     中性结果（「当前没有可领取的签到活动」），不算失败。
+///   - **Qoder 国际版**（2026-10，issue #140）：同一条 campaign 链路，但上游
+///     **只对带设备风控头的请求**下发「每天领 100 Credits」—— 风控身份由本机
+///     Qoder 客户端 / qodercli 的 UMID 组件生成（`providers::qoder::risk`），
+///     Linux/Docker 可一键安装组件。缺组件时得到的是明确的说明而不是报错
+///     （也不落当日台账，第二天组件就位后照常领）。
 ///   - **Trae**：SOLO 的 `checkin_credits` 领取（`providers::trae::checkin`）。
 ///     加它不是因为"别家有"，而是这条链**有钱**：SOLO 转积分制后，模型调用花的
 ///     正是签到钱包那份积分，不签就是每天白丢一笔额度。它的风险不在"该不该签"
@@ -87,13 +90,14 @@ pub const DEFAULT_TIME: &str = "00:01";
 /// 这是「有签到或每日活跃任务」的清单，不是「有积分概念」的清单：CatPaw 有积分
 /// 查询但没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 9] = [
+pub const CHECKIN_PROVIDERS: [&str; 10] = [
     "workbuddy",
     "workbuddy-intl",
     "raccoon",
     "autoclaw",
     "autoclaw-intl",
     "qoder",
+    "qoder-intl",
     "trae",
     "loomy",
     "kuku",
@@ -110,19 +114,15 @@ pub fn default_providers() -> Vec<String> {
 /// WorkBuddy 两个地区在注册表里就叫「WorkBuddy 国内版 / 国际版」（拆家后的
 /// 既定口径），签到语境沿用注册名即可 —— 国际版执行的是活跃任务而不是普通
 /// 签到，这件事由签到中心 `PROVIDER_DESC` 的链路说明与它的分组描述讲清楚，
-/// 不在标签里堆字。唯一要覆盖的是 **Qoder**：注册表是通用名（它没有拆家，
-/// 一个 id 覆盖两个地区），而签到**只在中国版成立**（国际版没有签到计划），
-/// 所以这里补成「Qoder 中国版」。其余几家不需要后缀：小浣熊没有版本区分，
+/// 不在标签里堆字。Qoder 拆家（2026-10）后注册名就是「Qoder 中国版 /
+/// 国际版」，不再需要这里的覆盖。其余几家不需要后缀：小浣熊没有版本区分，
 /// AutoClaw 两地的签到链路都存在且同形 —— 展示名已带「国内版 / 国际版」。
 pub fn provider_label(id: &str) -> &str {
-    match id {
-        "qoder" => "Qoder 中国版",
-        other => crate::server::core::providers::PROVIDERS
-            .iter()
-            .find(|meta| meta.id == other)
-            .map(|meta| meta.label)
-            .unwrap_or(other),
-    }
+    crate::server::core::providers::PROVIDERS
+        .iter()
+        .find(|meta| meta.id == id)
+        .map(|meta| meta.label)
+        .unwrap_or(id)
 }
 
 /// 归一化配置里的提供商清单：只认 CHECKIN_PROVIDERS 里的 id（去重、保持顺序），
