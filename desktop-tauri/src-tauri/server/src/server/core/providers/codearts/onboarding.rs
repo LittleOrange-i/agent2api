@@ -61,7 +61,9 @@ fn task_row(item: &Campaign) -> Value {
         // key 用 type 而不是 campaignId：同一类活动换期会变 id，而面板上的
         // 「这一条领过没有」是按类读的（与 Loomy 用任务名当 key 同一口径）
         "key": item.kind,
-        "title": if item.title.trim().is_empty() { item.kind.clone() } else { item.title.clone() },
+        // 标题按 kind 翻成中文（上游 title 是英文的，只有注册礼那条给过中文；
+        // 映射范围与回退口径见 `Campaign::display_title`）
+        "title": item.display_title(),
         "group": TASK_GROUP,
         "points": item.benefit_amount,
         "unit": item.benefit_unit,
@@ -122,13 +124,20 @@ pub async fn claim_all(store: &AccountStore, account_id: &str) -> Result<Value, 
     )
     .await?;
     // 领取流程只在「全部回读确认」时才交出 after；其余分支（已领过 / 没有活 /
-    // 被限流）用一次只读查询把当前真相取回来，面板显示的永远是上游的说法。
-    let after: Vec<Campaign> = if run.after.is_empty() {
-        welfare::newbie_gift(store, account_id, base()).await?
-    } else {
-        run.after
-    };
-    let rows: Vec<Value> = after.iter().map(task_row).collect();
+    // 被限流）用 `before`（就是本轮挑中的那几条）当当前真相 —— 两条路都**不再
+    // 额外打一次 delivery**（旧实现在 after 为空时回落到 `newbie_gift`，
+    // 那是一次多余的只读请求）。
+    let after: Vec<Campaign> = if run.after.is_empty() { run.before.clone() } else { run.after };
+    // 任务清单恒为「新人礼那一条」：`after` 在成功路径上是回读的**全量**活动
+    // 列表（执行体要它逐条确认），直接拿它铺行会让卡片在领取后多出邀请 /
+    // 学生认证 / 每日签到三条 —— 同一张卡片「查询」一条、「领取」四条，
+    // 点一次变一次。这里与 `get_tasks` 同用 `is_newbie_gift` 一把筛子，
+    // 两个接口的 tasks / earned / total / unclaimed 因此永远同源。
+    let rows: Vec<Value> = after
+        .iter()
+        .filter(|item| item.is_newbie_gift())
+        .map(task_row)
+        .collect();
     // 本轮真正到手的那几条：领取前有活、回读之后已确认
     let landed: Vec<&Campaign> = run
         .before
@@ -225,8 +234,36 @@ mod shaping {
     }
 
     #[test]
-    fn the_title_falls_back_to_the_kind_only_when_upstream_gave_none() {
-        assert_eq!("新人注册礼", task_row(&campaign("4", "NEW_USER_REGISTER", "新人注册礼", true, "", 1.0))["title"]);
-        assert_eq!("NEW_USER_REGISTER", task_row(&campaign("4", "NEW_USER_REGISTER", "   ", true, "", 1.0))["title"]);
+    fn titles_are_mapped_by_kind_and_fall_back_to_upstream_when_unknown() {
+        // 认得的类：按 kind 给中文，忽略上游那个英文 title（金额不重复写进标题）
+        assert_eq!(
+            "每日签到",
+            task_row(&campaign("1", "DAILY_CLAIM", "Daily Check-in: Claim 1000 Credits", true, "", 1000.0))["title"]
+        );
+        assert_eq!(
+            "用户登录送积分",
+            task_row(&campaign("1", "USER_LOGIN", "Login reward for credits", true, "", 100.0))["title"]
+        );
+        assert_eq!(
+            "新用户注册礼",
+            task_row(&campaign("4", "NEW_USER_REGISTER", "新用户注册送 4000 积分", true, "", 4000.0))["title"]
+        );
+        assert_eq!(
+            "学生认证",
+            task_row(&campaign("2", "STUDENT_CERTIFIED", "Student Certification: Claim 4000 Credits", false, "", 4000.0))["title"]
+        );
+        assert_eq!(
+            "邀请好友",
+            task_row(&campaign("3", "INVITE_USER", "Invite & Earn with Referral Codes", true, "ENTRY", 1000.0))["title"]
+        );
+        // 认不出的类：回退上游原文；上游也没给才回退 kind
+        assert_eq!(
+            "Some New Campaign",
+            task_row(&campaign("9", "SOME_NEW_KIND", "Some New Campaign", true, "", 1.0))["title"]
+        );
+        assert_eq!(
+            "SOME_NEW_KIND",
+            task_row(&campaign("9", "SOME_NEW_KIND", "   ", true, "", 1.0))["title"]
+        );
     }
 }

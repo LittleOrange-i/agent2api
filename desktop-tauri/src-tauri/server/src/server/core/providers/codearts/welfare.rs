@@ -87,6 +87,46 @@ impl Campaign {
         self.kind == "USER_LOGIN" && self.benefit_unit == "CREDIT" && !self.key().is_empty()
     }
 
+    /// 面板展示用的中文标题。
+    ///
+    /// ── 为什么要映射（不直接用上游 title）────────────────────────
+    /// 上游 `delivery` 的 title 是英文的（"Daily Check-in: Claim 1000 Credits"、
+    /// "Student Certification: Claim 4000 Credits"…），只有注册礼那条给了中文。
+    /// 面板是中文界面，任务清单里混着两行英文读起来是断裂的 —— 这里按 **kind**
+    /// 翻成中文：kind 是活动**类**的稳定标识（换期只改 id 与文案，类不变），
+    /// 而 title 会随活动文案改（"新人注册送 4000 积分" 这种把金额写进去的形态
+    /// 还会跟着金额变）。金额不拼进标题：任务行右侧已有「+N」那一列，拼进来
+    /// 就是同一句话说两遍。
+    ///
+    /// ── 中文名的来源：官方客户端的 i18n，不是自己编 ──────────────
+    /// 官方 IDE（`D:\Program Files\CodeArts` 的 app.asar）里
+    /// `normalizeActivityType` 把四类映射成 daily_claim / invite / student_certify
+    /// / login，标题就是按这套映射取的本地化文案（它**不看**服务端给的 title）：
+    ///   「每日签到领 {n} 积分」「邀请好友得 {n} 积分」「学生认证领 {n} 积分」
+    ///   「用户登录送积分」
+    /// 这里取同名去金额，与官方客户端同一套口径（`DAILY_CLAIM` 与 `USER_LOGIN`
+    /// 都收：官方常量表里两个都在，实测清单里出现的是哪一个尚未定论）。
+    ///
+    /// 认不出的 kind 回退上游原文（再空才回退 kind 本身）—— 上游新增活动类型时
+    /// 面板不会开天窗，只是那一行暂时保持原文。
+    pub fn display_title(&self) -> String {
+        let mapped = match self.kind.as_str() {
+            "DAILY_CLAIM" => "每日签到",
+            "USER_LOGIN" => "用户登录送积分",
+            "NEW_USER_REGISTER" => "新用户注册礼",
+            "STUDENT_CERTIFIED" => "学生认证",
+            "INVITE_USER" => "邀请好友",
+            _ => "",
+        };
+        if !mapped.is_empty() {
+            return mapped.to_string();
+        }
+        if !self.title.trim().is_empty() {
+            return self.title.clone();
+        }
+        self.kind.clone()
+    }
+
     /// 属于**新人注册礼**这一条 —— 签到中心「新手任务」只给这一条入口。
     ///
     /// 官方 IDE 的 `ActivityWelfarePane.TYPE_ORDER` 把活动分成四类，`USER_LOGIN`
