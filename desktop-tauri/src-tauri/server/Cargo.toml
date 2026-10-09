@@ -116,3 +116,6 @@ windows = { version = "0.61", features = [
 # 路由级测试用 `ServiceExt::oneshot` 直接打 Router（不占端口、不跑 serve），
 # 见 `server/http.rs` 的 CORS 用例。util 是 oneshot 所在的那个 feature。
 tower = { version = "0.5", features = ["util"] }
+# 尺寸墙探针要给同一个请求体做 gzip 对照（`codearts/chat.rs` 的 size_wall 用例）。
+# 只在测试目标里链，不进 release 产物；锁文件里本来就有这个包，没有新增解析结果。
+flate2 = "1"

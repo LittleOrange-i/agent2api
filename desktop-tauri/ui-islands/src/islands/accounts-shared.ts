@@ -193,6 +193,8 @@ export type OnboardingTaskRaw = {
   group?: unknown
   points?: unknown
   done?: unknown
+  /** 前置没满足 ⇒ 这一条现在领不动（CodeArts 新人礼未到门槛 / 活动未开始） */
+  blocked?: unknown
 }
 
 /** 渲染用的归一形状（claiming / error 是前端运行态，后端没有） */
@@ -202,6 +204,8 @@ export type OnboardingTask = {
   group: string
   points: number
   done: boolean
+  /** 见 {@link OnboardingTaskRaw.blocked}：既不计入待领数，也不发领取 */
+  blocked: boolean
   claiming?: boolean
   error?: string
 }
