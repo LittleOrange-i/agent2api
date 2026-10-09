@@ -345,6 +345,14 @@ impl AccountStore {
                     "lowBalance".to_string(),
                     low_balance_public(&record.provider(), record.fields().get("lowBalance")),
                 );
+                // 每账号的「限制器」有效规则（余额 / Token 规则列表）：恒为数组 ——
+                // 记录上没有 `limiters` 键（旧版写的记录）时由 lowBalance / provider
+                // 缺省**推导**（见 `limiter::effective_rules`），前端因此不必自带
+                // 推导逻辑，弹窗、徽章与后端选路读到的永远是同一份规则。
+                fields.insert(
+                    "limiters".to_string(),
+                    crate::server::core::limiter::effective_rules_json_in(record.fields()),
+                );
                 Value::Object(fields)
             }
             // 各家形状恒为对象；真出现异常形态时原样透出，不在这里改语义

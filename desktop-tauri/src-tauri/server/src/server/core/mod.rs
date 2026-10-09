@@ -68,6 +68,7 @@ pub mod egress;
 pub mod endpoints;
 pub mod import_ccswitch;
 pub mod key_scope;
+pub mod limiter;
 pub mod login;
 pub mod model_rules;
 pub mod models;

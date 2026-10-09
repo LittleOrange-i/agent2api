@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use crate::server::config;
 use crate::server::core::key_scope::{self, KeyScope};
+use crate::server::core::limiter;
 use crate::server::core::providers::catalog::{
     advertised_manifest_contains, default_model_catalog, default_model_usable,
     has_available_providers, model_blocked_everywhere, suggest_advertised,
@@ -577,7 +578,16 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     entry.completion_tokens = snapshot.completion_tokens;
     entry.total_tokens = snapshot.total_tokens;
     entry.cache_read_tokens = snapshot.cache_read_tokens;
+    // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
+    // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
+    // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），
+    // tokens ≤ 0 在记账函数里也会拦 —— 失败请求通常没有用量，加了也是零。
+    let limited_account = entry.account_id.clone();
+    let limited_tokens = entry.total_tokens;
     context.stats.record(entry);
+    if !limited_account.is_empty() {
+        limiter::note_request_tokens(&limited_account, limited_tokens, finished_at);
+    }
     // 原始正文落库（request_raw 表）：与明细同 id、同开始时刻。独立于 record
     // 的一次写入（大字段不进记账热路径，理由见 `RequestStats::store_raw`）；
     // id 为空 / 两侧全空在 store_raw 内部拦下，失败只打控制台 —— 正文是

@@ -6,7 +6,7 @@
  * 本文件不碰 DOM、不读写模块状态，只依赖 window.wbProviders 的 label（运行期读）。
  *
  * ── 对外契约（必须原样保留的调用点）────────────────────────────
- *   · app.js:178  `wbAccountsModel.isRateLimited`（顶栏「已限流」计数）
+ *   · app.js:236  `wbAccountsModel.isLimited`（顶栏「已限流」计数，含余额不足档）
  *   · app.js:663  `wbAccountsModel.isDesktopAccount`（删除确认框的补充说明）
  *   · report.js:307 `wbAccountsModel.editionSuffix`（报表里账号名后的版本后缀）
  *   · models-fetch-modal.tsx:245 `wbAccountsModel.providerFeatures(...).emailAsName`
@@ -21,7 +21,7 @@
  * 所以筛选与计数都按这一条队列算，positionMap 的序号就是整张表的行序。
  */
 
-import { shared, formatTime, type AccountRecord, type AccountsSnapshot, type RateLimitInfo, type UsageEntry } from './accounts-shared'
+import { shared, formatTime, type AccountRecord, type AccountsSnapshot, type LimiterRule, type RateLimitInfo, type TokenReading, type UsageEntry } from './accounts-shared'
 
 /** 缺省 provider id（后端注册表的默认项；旧账号记录没有该字段时的兜底） */
 export const DEFAULT_PROVIDER_ID = 'workbuddy'
@@ -256,33 +256,60 @@ export function supportsUsage(account: AccountRecord | null | undefined): boolea
   return providerFeatures(providerOf(account)).usage
 }
 
-/* ─── 每账号的余额查询设置（账号设置弹窗「查询设置」段 + 余额列徽章共用）─── */
+/* ─── 每账号的余额查询设置（账号设置弹窗「查询设置」段共用）─── */
 
 /** 自动查询间隔的边界（秒）—— 与后端 `usage_records` 的常量同一对数值 */
 export const USAGE_QUERY_MIN_SECONDS = 30
 export const USAGE_QUERY_MAX_SECONDS = 86_400
 
-/** 余额不足的处理档（与后端 `lowBalance.mode` 同一套取值） */
-export type LowBalanceMode = 'off' | 'skip' | 'disable'
-
 /**
- * 缺省口径（记录上没有 usageQuery / lowBalance 字段时）—— 与后端
- * `usage_records::DEFAULT_*` 同一对数值：自动查询**开启**、1 分钟；余额不足
- * 按 provider 区分（见 `defaultLowBalanceMode`）。自动查询的缺省必须对齐
- * 全局任务时代「默认就在查」的行为，否则升级后所有人的余额列会静默停更。
+ * 缺省口径（记录上没有 usageQuery 字段时）—— 与后端
+ * `usage_records::DEFAULT_QUERY_INTERVAL_SECONDS` 同值：自动查询**开启**、
+ * 1 分钟。缺省必须对齐全局任务时代「默认就在查」的行为，否则升级后所有人的
+ * 余额列会静默停更。
  */
 export const DEFAULT_USAGE_INTERVAL_SECONDS = 60
+
+/* ─── 限制器（余额 / Token 规则列表）─────────────────────────
+ *
+ * 「余额不足处理」升级成了每账号可自定义的**限制规则列表**（账号记录的
+ * `limiters` 键，后端 `core::limiter`）：余额规则沿用旧两档的语义（阈值 +
+ * 严格小于，读数来自自动余额查询），Token 规则按**重置周期**内的累计消耗
+ * 判定（窗口对齐自然时间的固定窗口，30 分钟 ~ 24 小时）。跳过 = 自动恢复
+ * （余额回升 / 窗口重置），禁用 = 不自动恢复、需手动启用 —— 与旧两档一致。
+ *
+ * 判定与后端选路（`rotate::filter_limiter_blocked`）同一口径；后端公开形态
+ * 恒给有效规则数组，这里的读取只做容错（旧版后端没有 limiters 字段时按旧
+ * lowBalance 推导，行为与升级前逐字一致）。
+ */
+
+/** Token 规则重置周期的边界（秒）—— 与后端 `limiter::MIN/MAX_TOKEN_PERIOD_SECONDS` 同一对数值 */
+export const TOKEN_PERIOD_MIN_SECONDS = 1_800
+export const TOKEN_PERIOD_MAX_SECONDS = 86_400
+
+/** 旧「余额不足处理」的缺省阈值（限制器上线后只作为旧记录的推导兜底） */
 export const DEFAULT_LOW_BALANCE_THRESHOLD = 1
 
+/** CodeArts 缺省 Token 规则的阈值：**每日** 1000 万 Token（自然日 0 点重置）。 */
+export const DEFAULT_DAILY_TOKEN_LIMIT = 10_000_000
+
 /**
- * 各 provider 缺省的「余额不足处理」档 —— 与后端
- * `usage_records::default_low_balance_mode` 同一口径：Cline 免费池缺省
- * **不处理**（free 池的 credit 长期贴着 0 走、欠费是常态，缺省跳过@阈值 1
- * 会把几乎整个池从选路里剔掉），其余 provider 缺省**跳过**（没钱让路、
- * 回升自愈，历史缺省不变）。
+ * 各 provider 的**缺省限制规则** —— 与后端 `limiter::default_rules` 同一口径：
+ * - **CodeArts → Token 自然日 1000 万，跳过**：这家的余额读数常判不出
+ *   （免费版账号没有积分类计量表，额度全在福利 token 池），余额规则形同虚设；
+ *   「过了 0 点额度就回来」正是它的额度形态，按自然日 Token 判定才兜得住。
+ * - **Cline 免费池 → 无规则**（原「不处理」缺省的理由不变）。
+ * - **其余 → 余额 < 1 跳过**（历史缺省不变）。
  */
-export function defaultLowBalanceMode(provider: string | undefined | null): LowBalanceMode {
-  return provider === 'cline-free' ? 'off' : 'skip'
+export function defaultLimiters(provider: string | undefined | null): LimiterRule[] {
+  if (provider === 'codearts') {
+    return [{
+      type: 'token', action: 'skip', threshold: DEFAULT_DAILY_TOKEN_LIMIT,
+      reset: 'daily', enabled: true,
+    }]
+  }
+  if (provider === 'cline-free') return []
+  return [{ type: 'balance', action: 'skip', threshold: DEFAULT_LOW_BALANCE_THRESHOLD, enabled: true }]
 }
 
 /**
@@ -304,55 +331,109 @@ export function usageQueryOf(account: AccountRecord | null | undefined): {
   return { enabled, interval: enabled && !valid ? DEFAULT_USAGE_INTERVAL_SECONDS : interval }
 }
 
-/**
- * 余额不足处理的规范化读取。缺省（字段缺失 / mode 缺失）按 provider 区分
- * （见 `defaultLowBalanceMode`）；显式 `off` 必须保持 off（那是用户关掉的）；
- * skip / disable 档下阈值缺失或非法回落缺省 1。
- */
-export function lowBalanceOf(account: AccountRecord | null | undefined): {
-  mode: LowBalanceMode
-  threshold: number
-} {
-  const config = account?.lowBalance
-  const fallbackMode = defaultLowBalanceMode(providerOf(account))
-  if (!config || typeof config !== 'object') {
-    return fallbackMode === 'off'
-      ? { mode: 'off', threshold: 0 }
-      : { mode: 'skip', threshold: DEFAULT_LOW_BALANCE_THRESHOLD }
+/** 一条限制规则是否完整可用（容错读取的过滤判据；与后端解析同一套口径） */
+function limiterRuleValid(rule: unknown): rule is LimiterRule {
+  if (!rule || typeof rule !== 'object') return false
+  const data = rule as Record<string, unknown>
+  if (data.type !== 'balance' && data.type !== 'token') return false
+  if (data.action !== 'skip' && data.action !== 'disable') return false
+  const threshold = Number(data.threshold)
+  if (!Number.isFinite(threshold) || threshold <= 0) return false
+  if (data.type === 'token' && data.reset !== 'daily') {
+    // 固定周期要求合法周期；自然日没有周期长度，免校验
+    const period = Number(data.period)
+    if (!Number.isInteger(period) || period < TOKEN_PERIOD_MIN_SECONDS || period > TOKEN_PERIOD_MAX_SECONDS) {
+      return false
+    }
   }
-  const mode: LowBalanceMode =
-    config.mode === 'skip' || config.mode === 'disable' || config.mode === 'off'
-      ? config.mode
-      : fallbackMode
-  const threshold = Number(config.threshold) || 0
-  if (mode === 'off') return { mode, threshold: 0 }
-  return { mode, threshold: threshold > 0 ? threshold : DEFAULT_LOW_BALANCE_THRESHOLD }
+  return true
 }
 
 /**
- * 秒数 → 人能读的间隔文案（`每 90 分钟` 这类），与后端变更提示同一口径：
- * 整小时 / 整分钟进位，其余按秒。
+ * 记录上没有 `limiters` 键（旧版后端 / 旧记录）时的推导：有显式 `lowBalance`
+ * （用户 / 旧版配过）就原样尊重；两者都没有时按 provider 给缺省规则
+ * （`defaultLimiters`，CodeArts 拿到的是 Token 自然日规则）。
+ * 与后端 `limiter::derive_from_legacy` 同一口径。
  */
-export function formatIntervalSeconds(seconds: number): string {
-  if (seconds > 0 && seconds % 3600 === 0) return `${seconds / 3600} 小时`
-  if (seconds > 0 && seconds % 60 === 0) return `${seconds / 60} 分钟`
-  return `${seconds} 秒`
+function legacyRulesOf(account: AccountRecord | null | undefined): LimiterRule[] {
+  const low = account?.lowBalance
+  if (!low || typeof low !== 'object' || !low.mode) return defaultLimiters(providerOf(account))
+  const thresholdRaw = Number(low.threshold)
+  const threshold = Number.isFinite(thresholdRaw) && thresholdRaw > 0 ? thresholdRaw : DEFAULT_LOW_BALANCE_THRESHOLD
+  if (low.mode !== 'skip' && low.mode !== 'disable') return []
+  return [{ type: 'balance', action: low.mode, threshold, enabled: true }]
+}
+
+/**
+ * 这条账号的**有效限制规则**：后端公开形态恒给数组（未显式配置 = 推导结果），
+ * 这里只做容错过滤 —— 脏条目整条丢弃，不让一条坏数据把其余规则全废掉。
+ * 后端没有 limiters 字段（岛比后端新的一瞬 / 旧快照）时按旧配置推导兜底。
+ */
+export function limitersOf(account: AccountRecord | null | undefined): LimiterRule[] {
+  const raw = (account as Record<string, unknown> | null | undefined)?.limiters
+  if (Array.isArray(raw)) return raw.filter(limiterRuleValid)
+  return legacyRulesOf(account)
+}
+
+/** Token 规则子集（列表徽章 / 余额格第二行 / 弹窗展示共用） */
+export function tokenRulesOf(account: AccountRecord | null | undefined): LimiterRule[] {
+  return limitersOf(account).filter(rule => rule.type === 'token')
+}
+
+/** 当前时刻所在窗口的起点（毫秒）—— 与后端 `limiter::window_start` 同一口径 */
+export function windowStartOf(nowMs: number, periodSeconds: number): number {
+  const periodMs = periodSeconds * 1000
+  return nowMs - (nowMs % periodMs)
+}
+
+/** 规则的窗口种类：固定周期 = 周期秒数；自然日 = 0（与后端 `rule_kind` 同一口径） */
+export function ruleKindOf(rule: LimiterRule): number {
+  return rule.reset === 'daily' ? 0 : (rule.period ?? 0)
+}
+
+/** 种类 → 当前窗口起点：0 = 本地时区当日 0 点（与签到中心「今天」同一口径），其余固定周期 */
+export function kindWindowStart(kind: number, nowMs: number = Date.now()): number {
+  if (kind === 0) {
+    const day = new Date(nowMs)
+    day.setHours(0, 0, 0, 0)
+    return day.getTime()
+  }
+  return windowStartOf(nowMs, kind)
+}
+
+/**
+ * 规则在**当前窗口**的消耗读数：`readings`（快照 `tokenUsage` 的行）里找
+ * 同窗口种类的那条；窗口已翻页（读数的 windowStart 对不上现算值）按 0 算 ——
+ * 拦是对「这个窗口已经用超」的断言，拿不出证据就不拦。
+ */
+export function tokenReadingForRule(
+  rule: LimiterRule,
+  readings: TokenReading[] | undefined,
+  nowMs: number = Date.now(),
+): TokenReading | null {
+  if (rule.type !== 'token') return null
+  const kind = ruleKindOf(rule)
+  const reading = (readings || []).find(item => Number(item.kind) === kind)
+  if (!reading) return null
+  return Number(reading.windowStart) === kindWindowStart(kind, nowMs) ? reading : null
 }
 
 /**
  * 这条账号此刻是否应因「余额不足」被跳过（余额列徽章的判据）。
  *
- * 与后端选路过滤（`usage_records::balance_blocked`）同一口径：mode == 'skip'
- * 且最近一次读数判得出数字且严格小于阈值（等于仍可用）。`entry` 是余额缓存的
- * 读数（`usageEntryOf` 的结果）—— 判不出（未查询 / 失败行 / unlimited / 数字
- * 缺失）一律放行：跳过是对「这个账号没钱」的断言，拿不出证据就不亮徽章。
+ * 与后端选路过滤（`limiter::balance_skip_blocked`）同一口径：任一启用的余额
+ * skip 规则满足「最近一次读数判得出数字且严格小于阈值（等于仍可用）」即拦。
+ * `entry` 是余额缓存的读数（`usageEntryOf` 的结果）—— 判不出（未查询 / 失败行
+ * / unlimited / 数字缺失）一律放行：跳过是对「这个账号没钱」的断言，拿不出
+ * 证据就不亮徽章。
  */
-export function lowBalanceBlockedOf(
+export function balanceBlockedOf(
   account: AccountRecord | null | undefined,
   entry: UsageEntry,
 ): boolean {
-  const { mode, threshold } = lowBalanceOf(account)
-  if (mode !== 'skip' || !(threshold > 0)) return false
+  const rules = limitersOf(account).filter(rule =>
+    rule.type === 'balance' && rule.action === 'skip' && rule.enabled !== false && rule.threshold > 0)
+  if (!rules.length) return false
   if (!entry || typeof entry !== 'object') return false
   const data = entry as Record<string, unknown>
   if (data.unlimited) return false
@@ -364,7 +445,90 @@ export function lowBalanceBlockedOf(
   const raw = data.totalLeft ?? data.available
   if (raw === null || raw === undefined || raw === '') return false
   const remaining = Number(raw)
-  return Number.isFinite(remaining) && remaining < threshold
+  return Number.isFinite(remaining) && rules.some(rule => remaining < rule.threshold)
+}
+
+/**
+ * 这条账号此刻是否应因「Token 限额」被跳过（状态列 / 余额列徽章的判据）。
+ *
+ * 与后端选路过滤（`limiter::token_skip_blocked`）同一口径：任一启用的 Token
+ * skip 规则满足「当前窗口消耗 ≥ 阈值」即拦。`readings` 是用量快照带来的窗口
+ * 读数（`tokenUsageOf` 的结果）—— 没有读数 / 窗口已翻页按 0 算（放行）。
+ */
+export function tokenBlockedOf(
+  account: AccountRecord | null | undefined,
+  readings: TokenReading[] | undefined,
+): boolean {
+  const rules = limitersOf(account).filter(rule =>
+    rule.type === 'token' && rule.action === 'skip' && rule.enabled !== false)
+  if (!rules.length || !readings?.length) return false
+  const now = Date.now()
+  return rules.some(rule => {
+    const reading = tokenReadingForRule(rule, readings, now)
+    return reading !== null && Number(reading.used) >= rule.threshold
+  })
+}
+
+/**
+ * Token **禁用**档是否已命中（状态列「Token 限额 · 已禁用」徽章的判据）：
+ * 任一启用的 Token disable 规则满足「当前窗口消耗 ≥ 阈值」。与后端自动禁用
+ * 钩子同判据 —— 账号被禁用（enabled=false）时用它回答「是不是 Token 限额禁的」
+ * （禁用动作本身不落「为什么」的标记，读数就是证据）。
+ */
+export function tokenDisableTriggeredOf(
+  account: AccountRecord | null | undefined,
+  readings: TokenReading[] | undefined,
+): boolean {
+  return limitersOf(account).some(rule => {
+    if (rule.type !== 'token' || rule.action !== 'disable' || rule.enabled === false) return false
+    const reading = tokenReadingForRule(rule, readings)
+    return reading !== null && Number(reading.used) >= rule.threshold
+  })
+}
+
+/**
+ * Token 规则窗口的信息（显示层共用：列表徽章、余额格第二行、编辑器实况提示）。
+ * `remainingMs` 是到窗口重置的剩余毫秒 —— 固定周期 = 窗口终点 - now；自然日 =
+ * 下一个本地 0 点 - now（用「明日 0 点」现算而不是 +24h，DST 日也说得准）。
+ */
+export function tokenWindowInfo(
+  rule: LimiterRule,
+  nowMs: number = Date.now(),
+): { kind: number; startMs: number; remainingMs: number; daily: boolean } {
+  const kind = ruleKindOf(rule)
+  const startMs = kindWindowStart(kind, nowMs)
+  const remainingMs = kind === 0
+    ? Math.max(0, kindWindowStart(0, startMs + 86_400_000 + 3_600_000) - nowMs)
+    : Math.max(0, startMs + kind * 1000 - nowMs)
+  return { kind, startMs, remainingMs, daily: kind === 0 }
+}
+
+/** 剩余毫秒 → 倒计时一句话：固定周期「剩 23 分钟」，自然日「今日剩 6 小时」。 */
+export function tokenCountdownText(remainingMs: number, daily: boolean): string {
+  if (remainingMs <= 0) return ''
+  const minutes = Math.ceil(remainingMs / 60_000)
+  if (daily) {
+    const hours = Math.ceil(remainingMs / 3_600_000)
+    return hours >= 1 ? `今日剩 ${hours} 小时` : `今日剩 ${minutes} 分钟`
+  }
+  return minutes >= 1 ? `剩 ${minutes} 分钟` : '剩不到 1 分钟'
+}
+
+/** Token 数的展示形态：`310000` → `31 万`、`2030000` → `203 万`、`150000000` → `1.5 亿`。 */
+export function formatTokenCount(value: unknown): string {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  if (number >= 100_000_000) return `${Number((number / 100_000_000).toFixed(1))} 亿`
+  if (number >= 10_000) return `${Number((number / 10_000).toFixed(1))} 万`
+  return String(Math.round(number))
+}
+
+/** 秒数 → 人能读的间隔文案（`每 90 分钟` 这类），与后端变更提示同一口径：
+ * 整小时 / 整分钟进位，其余按秒。 */
+export function formatIntervalSeconds(seconds: number): string {
+  if (seconds > 0 && seconds % 3600 === 0) return `${seconds / 3600} 小时`
+  if (seconds > 0 && seconds % 60 === 0) return `${seconds / 60} 分钟`
+  return `${seconds} 秒`
 }
 
 /** 是否为「桌面端实时登录态」账号（凭证实时读客户端文件；可禁用、也可删除） */
@@ -614,6 +778,33 @@ export function welfareTodoTitle(state: WelfareState): string {
 
 export type AccountFilter = { provider: string; enabled: string; limit: string }
 
+/** 余额读数的查找口（账号 → `usageEntryOf` 的结果）；不传视作「都没有读数」 */
+export type UsageLookup = (account: AccountRecord) => UsageEntry | undefined
+
+/** Token 周期消耗读数的查找口（账号 → `tokenUsageOf` 的结果）；不传视作「都没有读数」 */
+export type TokenUsageLookup = (account: AccountRecord) => TokenReading[]
+
+/**
+ * 「已限流」的**完整口径**：模型限流中，**或**限制器把账号拦在了选路外 ——
+ * 余额不足已到跳过档（`entry` 是余额缓存的读数）**或** Token 限额跳过档
+ * （`tokenReadings` 是用量快照带来的窗口读数）。后两类在 `rateLimits` 里没有
+ * 任何记录，但同样让账号此刻接不了转发 —— 用户在筛选分段里问的是「哪些账号
+ * 不接请求」，所以一起归进「已限流」，筛选、分段计数、限流列与顶栏徽标共用
+ * 这一份判定，不会各算各的。
+ * 两条限制**只有拿得出读数才参与**（判据与徽章同一条，见 balanceBlockedOf /
+ * tokenBlockedOf）：没查过 / 查失败的账号不因限制归入已限流 —— 拿不出证据就
+ * 不下断言。
+ */
+export function isLimitedNow(
+  account: AccountRecord | null | undefined,
+  entry?: UsageEntry,
+  tokenReadings?: TokenReading[],
+): boolean {
+  return isRateLimited(account)
+    || balanceBlockedOf(account, entry)
+    || tokenBlockedOf(account, tokenReadings)
+}
+
 export function matchProvider(account: AccountRecord, filter: AccountFilter): boolean {
   return filter.provider === 'all' || providerOf(account) === filter.provider
 }
@@ -624,17 +815,28 @@ export function matchEnabled(account: AccountRecord, filter: AccountFilter): boo
 }
 
 /** 已禁用账号既不算「正常」也不算「已限流」：限流状态只对参与转发的账号有意义 */
-export function matchLimit(account: AccountRecord, filter: AccountFilter): boolean {
+export function matchLimit(
+  account: AccountRecord,
+  filter: AccountFilter,
+  usageOf?: UsageLookup,
+  tokenUsageOf?: TokenUsageLookup,
+): boolean {
   if (filter.limit === 'all') return true
   if (!isEnabled(account)) return false
-  return filter.limit === 'limited' ? isRateLimited(account) : !isRateLimited(account)
+  const limited = isLimitedNow(account, usageOf?.(account), tokenUsageOf?.(account))
+  return filter.limit === 'limited' ? limited : !limited
 }
 
 /** 当前筛选条件下的可见账号（三个维度同时生效） */
-export function visibleAccounts(all: AccountRecord[] | null | undefined, filter: AccountFilter): AccountRecord[] {
+export function visibleAccounts(
+  all: AccountRecord[] | null | undefined,
+  filter: AccountFilter,
+  usageOf?: UsageLookup,
+  tokenUsageOf?: TokenUsageLookup,
+): AccountRecord[] {
   return (all || []).filter(account => matchProvider(account, filter)
     && matchEnabled(account, filter)
-    && matchLimit(account, filter))
+    && matchLimit(account, filter, usageOf, tokenUsageOf))
 }
 
 /**
@@ -645,12 +847,14 @@ export function filterCounts(
   all: AccountRecord[] | null | undefined,
   filter: AccountFilter,
   summaries: Array<{ id: string }> | null | undefined,
+  usageOf?: UsageLookup,
+  tokenUsageOf?: TokenUsageLookup,
 ): Record<string, number> {
   const list = all || []
   const scope = (except: 'provider' | 'enabled' | 'limit') => list.filter(account =>
     (except === 'provider' || matchProvider(account, filter))
     && (except === 'enabled' || matchEnabled(account, filter))
-    && (except === 'limit' || matchLimit(account, filter)))
+    && (except === 'limit' || matchLimit(account, filter, usageOf, tokenUsageOf)))
 
   const forEnabled = scope('enabled')
   const forLimit = scope('limit')
@@ -660,8 +864,8 @@ export function filterCounts(
     enabled: forEnabled.filter(isEnabled).length,
     disabled: forEnabled.filter(a => !isEnabled(a)).length,
     limitAll: forLimit.length,
-    normal: forLimit.filter(a => isEnabled(a) && !isRateLimited(a)).length,
-    limited: forLimit.filter(a => isEnabled(a) && isRateLimited(a)).length,
+    normal: forLimit.filter(a => isEnabled(a) && !isLimitedNow(a, usageOf?.(a), tokenUsageOf?.(a))).length,
+    limited: forLimit.filter(a => isEnabled(a) && isLimitedNow(a, usageOf?.(a), tokenUsageOf?.(a))).length,
     providerAll: forProvider.length,
   }
   // 摘要里每一家都要有键（没有账号的家显示 0 并置灰），否则它的徽标会停在旧数字上

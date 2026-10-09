@@ -41,18 +41,20 @@ import {
   TooltipTrigger,
   cn,
 } from '@ui'
-import { formatTime, poolItemLabel, POOL_VALUE_PREFIX, shared, type AccountRecord, type UsageEntry } from './accounts-shared'
+import { formatTime, poolItemLabel, POOL_VALUE_PREFIX, shared, type AccountRecord, type LimiterRule, type TokenReading, type UsageEntry } from './accounts-shared'
 import {
-  accountTags, activeLimits, claimDoneTitle, claimedToday,
-  displayNameOf, editionSuffix, expiryMillis, formatResetText, identifierOf, isDesktopAccount, isEnabled,
-  lowBalanceBlockedOf, lowBalanceOf, planBadgeLabel, providerFeatures, providerOf, RESET_UNKNOWN,
-  supportsClaim, supportsUsage, supportsUsageDetail,
+  accountTags, activeLimits, balanceBlockedOf, claimDoneTitle, claimedToday,
+  displayNameOf, editionSuffix, expiryMillis, formatIntervalSeconds, formatResetText,
+  formatTokenCount, identifierOf, isDesktopAccount, isEnabled, planBadgeLabel, providerFeatures,
+  providerOf, RESET_UNKNOWN, supportsClaim, supportsUsage, supportsUsageDetail,
+  tokenBlockedOf, tokenCountdownText, tokenDisableTriggeredOf, tokenReadingForRule,
+  tokenRulesOf, tokenWindowInfo,
 } from './accounts-domain'
 import { PRIORITY_MAX, PRIORITY_MIN, priorityOf } from './accounts-columns'
 import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
   commitPriority, connectionsOf, maskName, moveAccount, openSettingsDialog, poolError,
-  proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setPanelOpen,
+  proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setPanelOpen, tokenUsageOf,
   startZcodeClaim, toggleNamesHidden, usageEntryOf, usageFailureOf,
 } from './accounts-data'
 /** 图标（icons.js 的内联 SVG 串）：整站共用一份图标集，这里只做注入 */
@@ -155,6 +157,16 @@ export function PriorityStepper({ account, seat }: {
 export function StatusCell({ account }: { account: AccountRecord }) {
   const enabled = isEnabled(account)
   const tags = accountTags(account)
+  // Token 限额的禁用档命中且账号已被禁用：补一枚红色徽章回答「为什么是禁的」
+  // —— 禁用动作本身不带「为什么」的标记，当前窗口的消耗读数就是证据（与后端
+  // 自动禁用钩子同判据，见 tokenDisableTriggeredOf）。
+  if (!enabled && tokenDisableTriggeredOf(account, tokenUsageOf(account))) {
+    tags.push({
+      text: 'Token 限额 · 已禁用',
+      kind: 'bad' as const,
+      title: '本周期 Token 消耗达到限制器的上限，账号已被自动禁用（窗口重置也不恢复，需手动启用）',
+    })
+  }
   const who = displayNameOf(account) || account.id
   return (
     <>
@@ -179,10 +191,30 @@ export function StatusCell({ account }: { account: AccountRecord }) {
  * 限流：这个账号**当前限流中的模型**。限额在后端按「账号 × 模型」记，四家通用 ——
  * 所以这一列对四家都成立，不再需要「选个模型看队列」的筛选器。
  * 有限流时是一枚可点的黄色徽章（点开 / 收起行下的明细面板），正常时是绿点「正常」。
+ *
+ * 「已限流」分段把限制器的跳过档也算进来（isLimitedNow 的口径），这一列必须同口径：
+ * 没有模型限额但被限制器拦下的账号不亮绿点，给一枚黄色「余额不足 / Token 限额」
+ * 说明它为何归入已限流（跳过的细节仍由余额列的徽章承载，这里不复述）。
  */
 export function LimitsCell({ account, open }: { account: AccountRecord; open: boolean }) {
   const entries = activeLimits(account)
   if (!entries.length) {
+    if (balanceBlockedOf(account, usageEntryOf(account))) {
+      return (
+        <Badge variant='warning' shape='tag'
+          title='余额低于限制器的阈值，转发时会跳过该账号（余额回升自动恢复）'>
+          余额不足
+        </Badge>
+      )
+    }
+    if (tokenBlockedOf(account, tokenUsageOf(account))) {
+      return (
+        <Badge variant='warning' shape='tag'
+          title='本周期 Token 消耗达到限制器的上限，转发时会跳过该账号（窗口重置自动恢复）'>
+          Token 限额
+        </Badge>
+      )
+    }
     return (
       <Badge variant='success' shape='tag' title='当前没有任何模型处于限流中'>
         <BadgeDot />正常
@@ -592,6 +624,42 @@ function usageDetailOf(entry: UsageEntry): UsageDetail | null {
  * （积分池 / token 池各一组，见 `UsageDetailCell`）。悬停提示保留 —— 弹层是
  * 「要看构成」的入口，悬停仍是「顺眼一看」的那份摘要。
  */
+/**
+ * 余额格里 Token 限制器的**第二行读数**：配了 Token 规则的账号显示
+ * 「周期 Token 已用 / 上限 · 剩 N 分」。多条规则取「最值得关注的那条」——
+ * 已触发的优先，否则取用量比例最高的一条；其余规则在设置弹窗里看全貌。
+ */
+function prominentTokenLimit(account: AccountRecord): React.ReactNode {
+  const readings = tokenUsageOf(account)
+  let best: { rule: LimiterRule; reading: TokenReading; ratio: number } | null = null
+  for (const rule of tokenRulesOf(account)) {
+    if (rule.enabled === false) continue
+    const reading = tokenReadingForRule(rule, readings)
+    if (!reading) continue
+    const ratio = rule.threshold > 0 ? reading.used / rule.threshold : 0
+    if (ratio >= 1) {
+      best = { rule, reading, ratio }
+      break
+    }
+    if (!best || ratio > best.ratio) best = { rule, reading, ratio }
+  }
+  if (!best) return null
+  const { rule, reading } = best
+  const hit = reading.used >= rule.threshold
+  const info = tokenWindowInfo(rule)
+  const countdown = !hit ? ` · ${tokenCountdownText(info.remainingMs, info.daily)}` : ''
+  const scope = info.daily ? '今日已用' : '周期 Token'
+  const title = `限制器：${rule.reset === 'daily' ? '今天（本地 0 点重置）' : `${formatIntervalSeconds(rule.period ?? 0)}窗口`}已用 `
+    + `${Math.round(reading.used).toLocaleString('en-US')} / ${Math.round(rule.threshold).toLocaleString('en-US')} Token`
+    + (hit ? '，已达到上限' : `，${tokenCountdownText(info.remainingMs, info.daily)}重置`)
+  return (
+    <span className='usage-token-sub' title={title}>
+      {scope} <span className={hit ? 'hit' : undefined}>{formatTokenCount(reading.used)}</span>
+      {' '}/ {formatTokenCount(rule.threshold)}{countdown}
+    </span>
+  )
+}
+
 export function UsageCell({ account }: { account: AccountRecord }) {
   if (!supportsUsage(account)) {
     return <span className='muted' title='该提供商没有余额查询'>—</span>
@@ -600,27 +668,33 @@ export function UsageCell({ account }: { account: AccountRecord }) {
   // 的失败结论，理由与后端快照出口一致
   const entry = usageEntryOf(account)
   const summary = usageSummary(entry)
-  // 「余额不足已跳过」徽章：与后端选路过滤同一判据（lowBalanceBlockedOf），
+  // 限制器的跳过徽章：与后端选路过滤同一判据（balanceBlockedOf / tokenBlockedOf），
   // 让「为什么这个账号不接请求」在界面上有处可看。禁用档不标 —— 那一档
   // 状态列的「已禁用」开关就是答案；跳过档账号仍是启用的，不标就看不出。
-  const blocked = lowBalanceBlockedOf(account, entry)
-  const blockedBadge = blocked ? (
+  const blockedBadge = balanceBlockedOf(account, entry) ? (
     <Badge variant='warning' shape='tag'
-      title={`余额低于阈值 ${lowBalanceOf(account).threshold}，转发时会跳过该账号（余额回升自动恢复）`}>
+      title='余额低于限制器的阈值，转发时会跳过该账号（余额回升自动恢复）'>
       余额不足 · 已跳过
     </Badge>
+  ) : tokenBlockedOf(account, tokenUsageOf(account)) ? (
+    <Badge variant='warning' shape='tag'
+      title='本周期 Token 消耗达到限制器的上限，转发时会跳过该账号（窗口重置自动恢复）'>
+      Token 限额 · 已跳过
+    </Badge>
   ) : null
+  const tokenSub = prominentTokenLimit(account)
   if (supportsUsageDetail(account)) {
     const usable = summary.kind === 'ok' || summary.kind === 'warn'
     const detail = usable ? usageDetailOf(entry) : null
     if (detail) {
-      return <UsageDetailCell summary={summary} detail={detail} blockedBadge={blockedBadge} />
+      return <UsageDetailCell summary={summary} detail={detail} blockedBadge={blockedBadge} tokenSub={tokenSub} />
     }
     // 还没查到 / 查询失败 / 没拼出明细：维持单行读数的老样子
     return (
       <span className='usage-sum-wrap'>
         <span className={`usage-sum ${summary.kind}`} title={summary.title}>{summary.text}</span>
         {blockedBadge}
+        {tokenSub}
       </span>
     )
   }
@@ -632,6 +706,7 @@ export function UsageCell({ account }: { account: AccountRecord }) {
       <span className='usage-sum-wrap'>
         <span className={`usage-sum ${summary.kind}`} title={summary.title}>{summary.text}</span>
         {blockedBadge}
+        {tokenSub}
       </span>
     )
   }
@@ -643,6 +718,7 @@ export function UsageCell({ account }: { account: AccountRecord }) {
         <span className={`usage-pool-view ${summary.kind}`}>{pool.text}</span>
       </span>
       {blockedBadge}
+      {tokenSub}
     </span>
   )
 }
@@ -660,10 +736,12 @@ export function UsageCell({ account }: { account: AccountRecord }) {
  * 的信息，总额 + 弹层足够。弹层走组件库的 Popover（Portal + 贴边翻转都是现成的），
  * 锚点就是那颗积分读数按钮，与 ⋯ 菜单同一个交互语言。
  */
-function UsageDetailCell({ summary, detail, blockedBadge }: {
+function UsageDetailCell({ summary, detail, blockedBadge, tokenSub }: {
   summary: { text: string; kind: string; title: string }
   detail: UsageDetail
   blockedBadge: React.ReactNode
+  /** Token 限制器的周期读数（余额格第二行；配了规则才有） */
+  tokenSub: React.ReactNode
 }) {
   const [open, setOpen] = React.useState(false)
   const usable = summary.kind === 'ok' || summary.kind === 'warn'
@@ -734,6 +812,7 @@ function UsageDetailCell({ summary, detail, blockedBadge }: {
         </span>
       ) : null}
       {blockedBadge}
+      {tokenSub}
     </span>
   )
 }
@@ -1030,8 +1109,8 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
             设为首选
           </Button>
           <Button variant='ghost' size='sm' className={itemClass}
-            title='设置该账号同时最多处理的请求数（0 = 不限制）'
-            onClick={() => { setOpen(false); shared().wbAccountConcDialog?.open?.(account) }}>
+            title='在账号设置的「基本」分组里设置该账号同时最多处理的请求数'
+            onClick={() => { setOpen(false); openSettingsDialog(account.id) }}>
             并发上限：{maxConcurrent > 0 ? maxConcurrent : '不限'}
           </Button>
           {account.hasRefreshToken ? (
