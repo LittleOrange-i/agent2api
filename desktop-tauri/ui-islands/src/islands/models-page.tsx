@@ -669,8 +669,10 @@ function ModelsPage() {
       case 'alias':
         return <td className={cellClass('cell-alias', column.align)}>{aliasCell(model)}</td>
       case 'act': {
-        // 「测试」的两条门禁（映射全关 / 该家没有可用账号）由 model-test-dialog 统一判定，
-        // 这里只把理由挂到 title 上 —— 禁用而不说原因等于让用户猜
+        // 「测试」的门禁（该家没有可用账号）由 model-test-dialog 统一判定，这里只把
+        // 理由挂到 title 上 —— 禁用而不说原因等于让用户猜。未启用的行**不置灰**：
+        // 「先测通、再决定要不要启用」正是这颗按钮的用法（后端给测试开了直达跳，
+        // 见 model-test-dialog 的 testBlockReason）
         const blocked = testBlockReason(model.provider || '', model)
         return (
           <td className={cellClass('cell-act r', column.align)}>

@@ -228,24 +228,17 @@ function formatMs(value: unknown): string {
 }
 
 /**
- * 「测试」那颗按钮的两条门禁，都写进按钮的悬停说明，不做成静默失败：
- *   · 这一行的**默认绑定**（名字与模型 ID 相同的那条）关着 → 测试正是以这个名字发出去的，
- *     后端会把这种请求判成「模型已在网关中关闭」，那句话对用户毫无指引；
- *   · 该家**没有可用账号**（启用 + 凭证完整）→ 一行都发不出去。
- * 返回空串 = 可以测；否则返回要挂在按钮 title 上的原因。
+ * 「测试」那颗按钮的门禁：该家**没有可用账号**（启用 + 凭证完整）→ 一行都发不出去，
+ * 这是唯一还成立的置灰理由。返回空串 = 可以测；否则返回要挂在按钮 title 上的原因。
  *
- * 为什么判的是默认绑定而不是「有没有任意一条映射开着」：**别名不参与**这次测试（下游模型名
- * 就是本名），所以只开着别名映射时以本名发出去的路由仍然是断的 —— 那种情况下按钮该置灰并说清
- * 要打开哪一条，而不是让用户测出一次莫名其妙的 404。
+ * ── **未启用的行不再置灰**（曾经置灰，别改回去）────────────────
+ * 这颗按钮的用法本来就是「先测通、再决定要不要启用」—— 被测的行往往就是关着的，
+ * 置灰等于把按钮的唯一用途挡在门外。后端为此给测试开了直达跳
+ * （`ForwardRequest::ignore_model_gate`）：候选直接取被钉住的那家，跳过
+ * 「模型已在网关中关闭」的生产门禁；关闭的默认绑定解析不出改写目标，名字原样
+ * 直发、映射上的思考等级不注入 —— 测的就是这个模型在这家上游的**真实形态**。
  */
 export function testBlockReason(provider: string, model: ManageModel): string {
-  const bindings = bindingsOf(model)
-  const sameName = bindings.find(binding => binding.isDefault)
-  if (sameName && !sameName.enabled) {
-    return bindings.some(binding => binding.enabled)
-      ? '这一行的默认绑定（与模型 ID 同名的那条）是关着的，而测试就以这个名字发出去 —— 先打开它（别名映射不参与本次测试）'
-      : '这一行的映射全部关着，下游请求根本路由不到它 —— 先打开默认绑定那一条'
-  }
   if (!usableAccounts(provider).length) {
     return '该提供商没有可用账号（要在账号页启用一个、且凭证完整），一行都发不出去'
   }
@@ -442,7 +435,9 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   }
 
   // 本名直发时生效的思考等级只认「名字不变的那条按家映射」（见 model_rules::reasoning 第 4 条），
-  // 而那正是这一行的默认绑定 —— 与表格里默认 chip 上显示的是同一个值
+  // 而那正是这一行的默认绑定 —— 与表格里默认 chip 上显示的是同一个值。
+  // 该行未启用时映射整体不生效（生产路由也放不过去），等级自然不参与本次。
+  const defaultClosed = bindingsOf(model).find(binding => binding.isDefault)?.enabled === false
   const boundLevel = levelOf(model.id, model.id, provider)
   const aliases = bindingsOf(model)
     .filter(binding => !binding.isDefault)
@@ -452,14 +447,18 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   // 选「跟随映射」这一项（映射上没绑等级时它本来就不注入）
   const levelOptions = reasoningLevels(getSnapshot().data)
     .filter(level => level !== 'off' && level !== 'none')
-  const followLabel = boundLevel ? `跟随映射（当前 ${boundLevel}）` : '跟随映射（未绑定等级）'
+  const followLabel = defaultClosed
+    ? '跟随映射（该行未启用，本次不注入）'
+    : boundLevel ? `跟随映射（当前 ${boundLevel}）` : '跟随映射（未绑定等级）'
   /** 目标行 ⓘ 的口径：多数行没有别名 / 未绑等级，一句「以本名直发」就够 —— 说明悬停才见 */
   const targetTip = [
-    '以默认绑定的名字直发',
+    '以模型本名直发',
     aliases.length ? `另有 ${aliases.length} 条别名映射（${aliases.join('、')}），别名不参与本次` : '',
-    boundLevel
-      ? `映射上绑定的思考等级是 ${boundLevel}，「跟随映射」按它注入`
-      : '映射上未绑定思考等级，「跟随映射」等于这次不注入',
+    defaultClosed
+      ? '该行当前未启用：测试照常按本名直发（「先测通、再决定要不要启用」正是这颗按钮的用法），但本行的思考等级绑定不参与本次，生产路由也要等绑定打开后才会放行'
+      : boundLevel
+        ? `映射上绑定的思考等级是 ${boundLevel}，「跟随映射」按它注入`
+        : '映射上未绑定思考等级，「跟随映射」等于这次不注入',
   ].filter(Boolean).join('；') + '。'
   const accountOptions = usable.map(account => ({
     value: account.id,
